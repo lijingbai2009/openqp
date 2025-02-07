@@ -61,8 +61,12 @@ def compute_grad(mol):
     Gradient(mol).gradient()
 
     # compute properties
+
     if mol.config['input']['qmmm_flag']:
        oqp.resp_charges(mol)
+        
+    compute_scf_prop(mol)
+
 
     # compute dftd4
     LastStep(mol).compute(mol, grad_list=mol.config['properties']['grad'])
@@ -132,6 +136,9 @@ def compute_geom(mol):
 
     # optimize coordinates
     optimizer.optimize()
+
+    # compute properties
+    compute_scf_prop(mol)
 
 
 def compute_properties(mol):
