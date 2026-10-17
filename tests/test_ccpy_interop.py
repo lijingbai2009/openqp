@@ -82,6 +82,20 @@ def test_ensure_ccpy_installs_pinned_commit(monkeypatch, tmp_path):
                               f"@{ccpy_interop.CCPY_COMMIT}")
 
 
+def test_build_env_adds_homebrew_openblas_last(monkeypatch, tmp_path):
+    keg = tmp_path / "opt" / "openblas"
+    (keg / "lib" / "pkgconfig").mkdir(parents=True)
+    (keg / "lib" / "pkgconfig" / "openblas.pc").write_text("")
+    monkeypatch.setattr(ccpy_interop, "_HOMEBREW_OPENBLAS", (str(tmp_path / "none"), str(keg)))
+    monkeypatch.setattr(ccpy_interop.sys, "platform", "darwin")
+    monkeypatch.setenv("PKG_CONFIG_PATH", "/user/first")
+    paths = ccpy_interop._build_env()["PKG_CONFIG_PATH"].split(os.pathsep)
+    assert paths == ["/user/first", str(keg / "lib" / "pkgconfig")]
+
+    monkeypatch.setattr(ccpy_interop.sys, "platform", "linux")
+    assert ccpy_interop._build_env()["PKG_CONFIG_PATH"] == "/user/first"
+
+
 def test_ensure_ccpy_installed_by_another_process_while_waiting(monkeypatch, tmp_path):
     calls = _hide_ccpy(monkeypatch, tmp_path, failures=1)
     monkeypatch.setattr(ccpy_interop.subprocess, "run",

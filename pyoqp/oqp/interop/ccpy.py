@@ -85,7 +85,7 @@ def ensure_ccpy(install=None):
               "(GPL-3.0, external library)", flush=True)
         proc = subprocess.run(
             [sys.executable, "-m", "pip", "install", spec],
-            capture_output=True, text=True)
+            capture_output=True, text=True, env=_build_env())
         if proc.returncode != 0:
             tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-40:])
             raise RuntimeError(
@@ -93,6 +93,30 @@ def ensure_ccpy(install=None):
                 f"needs git, a Fortran compiler and OpenBLAS.\n{tail}")
         importlib.invalidate_caches()
         return importlib.import_module("ccpy")
+
+
+#: Homebrew installs OpenBLAS keg-only, so its openblas.pc is not on the
+#: default pkg-config path that CCpy's meson build searches.
+_HOMEBREW_OPENBLAS = ("/opt/homebrew/opt/openblas", "/usr/local/opt/openblas")
+
+
+def _build_env():
+    """Environment for the CCpy pip build.
+
+    On macOS, append Homebrew's OpenBLAS pkg-config directory (lowest
+    priority, so an OpenBLAS the user already exposes still wins).
+    """
+    env = dict(os.environ)
+    if sys.platform != "darwin":
+        return env
+    for prefix in _HOMEBREW_OPENBLAS:
+        pcdir = os.path.join(prefix, "lib", "pkgconfig")
+        if os.path.isfile(os.path.join(pcdir, "openblas.pc")):
+            paths = [p for p in env.get("PKG_CONFIG_PATH", "").split(os.pathsep) if p]
+            if pcdir not in paths:
+                env["PKG_CONFIG_PATH"] = os.pathsep.join(paths + [pcdir])
+            break
+    return env
 
 
 class _install_lock:
