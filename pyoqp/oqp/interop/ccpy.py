@@ -73,18 +73,51 @@ def ensure_ccpy(install=None):
             "CCpy is not installed and OPENQP_CCPY_AUTO_INSTALL=0. Install it with: "
             f"{sys.executable} -m pip install '{spec}'") from missing
 
-    print(f"   CCpy not found; installing {CCPY_REPOSITORY}@{CCPY_COMMIT[:12]} "
-          "(GPL-3.0, external library)", flush=True)
-    proc = subprocess.run(
-        [sys.executable, "-m", "pip", "install", spec],
-        capture_output=True, text=True)
-    if proc.returncode != 0:
-        tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-40:])
-        raise RuntimeError(
-            f"pip could not install CCpy (exit {proc.returncode}). The build "
-            f"needs git, a Fortran compiler and OpenBLAS.\n{tail}")
-    importlib.invalidate_caches()
-    return importlib.import_module("ccpy")
+    # Concurrent calculations in one environment must not run two pip builds
+    # into the same site-packages; the second waits and then finds CCpy.
+    with _install_lock():
+        importlib.invalidate_caches()
+        try:
+            return importlib.import_module("ccpy")
+        except ImportError:
+            pass
+        print(f"   CCpy not found; installing {CCPY_REPOSITORY}@{CCPY_COMMIT[:12]} "
+              "(GPL-3.0, external library)", flush=True)
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", spec],
+            capture_output=True, text=True)
+        if proc.returncode != 0:
+            tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-40:])
+            raise RuntimeError(
+                f"pip could not install CCpy (exit {proc.returncode}). The build "
+                f"needs git, a Fortran compiler and OpenBLAS.\n{tail}")
+        importlib.invalidate_caches()
+        return importlib.import_module("ccpy")
+
+
+class _install_lock:
+    """Exclusive lock on <sys.prefix>/.openqp-ccpy-install.lock."""
+
+    def __enter__(self):
+        path = os.path.join(sys.prefix, ".openqp-ccpy-install.lock")
+        self._fh = open(path, "a+")
+        if os.name == "nt":
+            import msvcrt
+            self._fh.seek(0)
+            self._unlock = lambda: msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+            msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            self._unlock = lambda: fcntl.flock(self._fh, fcntl.LOCK_UN)
+            fcntl.flock(self._fh, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            self._unlock()
+        finally:
+            self._fh.close()
+        return False
 
 
 def _scalar(mol, key):

@@ -38,14 +38,16 @@ ccpy_interop = _load_module()
 # On-demand installation
 # --------------------------------------------------------------------------
 
-def _hide_ccpy(monkeypatch):
+def _hide_ccpy(monkeypatch, tmp_path, failures=2):
+    """Make the first ``failures`` imports of ccpy fail, later ones succeed."""
     real = ccpy_interop.importlib.import_module
     calls = {"n": 0}
+    monkeypatch.setattr(ccpy_interop.sys, "prefix", str(tmp_path))
 
     def fake(name, *args, **kwargs):
         if name == "ccpy":
             calls["n"] += 1
-            if calls["n"] == 1:
+            if calls["n"] <= failures:
                 raise ImportError("No module named 'ccpy'")
             return types.SimpleNamespace(__name__="ccpy")
         return real(name, *args, **kwargs)
@@ -54,16 +56,16 @@ def _hide_ccpy(monkeypatch):
     return calls
 
 
-def test_ensure_ccpy_disabled_raises_with_pinned_command(monkeypatch):
-    _hide_ccpy(monkeypatch)
+def test_ensure_ccpy_disabled_raises_with_pinned_command(monkeypatch, tmp_path):
+    _hide_ccpy(monkeypatch, tmp_path)
     monkeypatch.setenv("OPENQP_CCPY_AUTO_INSTALL", "0")
     with pytest.raises(ImportError) as err:
         ccpy_interop.ensure_ccpy()
     assert ccpy_interop.CCPY_COMMIT in str(err.value)
 
 
-def test_ensure_ccpy_installs_pinned_commit(monkeypatch):
-    calls = _hide_ccpy(monkeypatch)
+def test_ensure_ccpy_installs_pinned_commit(monkeypatch, tmp_path):
+    calls = _hide_ccpy(monkeypatch, tmp_path)
     monkeypatch.delenv("OPENQP_CCPY_AUTO_INSTALL", raising=False)
     seen = {}
 
@@ -74,14 +76,22 @@ def test_ensure_ccpy_installs_pinned_commit(monkeypatch):
     monkeypatch.setattr(ccpy_interop.subprocess, "run", fake_run)
     mod = ccpy_interop.ensure_ccpy()
     assert mod.__name__ == "ccpy"
-    assert calls["n"] == 2
+    assert calls["n"] == 3          # before the lock, under the lock, after pip
     assert seen["cmd"][:4] == [sys.executable, "-m", "pip", "install"]
     assert seen["cmd"][4] == (f"coupled-cluster-py @ git+{ccpy_interop.CCPY_REPOSITORY}"
                               f"@{ccpy_interop.CCPY_COMMIT}")
 
 
-def test_ensure_ccpy_pip_failure_raises(monkeypatch):
-    _hide_ccpy(monkeypatch)
+def test_ensure_ccpy_installed_by_another_process_while_waiting(monkeypatch, tmp_path):
+    calls = _hide_ccpy(monkeypatch, tmp_path, failures=1)
+    monkeypatch.setattr(ccpy_interop.subprocess, "run",
+                        lambda *a, **k: pytest.fail("pip must not run twice"))
+    assert ccpy_interop.ensure_ccpy(install=True).__name__ == "ccpy"
+    assert calls["n"] == 2
+
+
+def test_ensure_ccpy_pip_failure_raises(monkeypatch, tmp_path):
+    _hide_ccpy(monkeypatch, tmp_path)
     monkeypatch.setattr(
         ccpy_interop.subprocess, "run",
         lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "meson: no fortran"))

@@ -326,6 +326,16 @@ jobs:
          # toolkit, the interop/export APIs, the input handling) could regress
          # silently. Run it on one leg: it is Python-only, so a second OS or the
          # MPI leg would re-run identical assertions against the same code.
+         - name: Install the external CCpy library (tests/test_ccpy_interop.py)
+           if: ${{ matrix.role == 'pytest' }}
+           run: |
+            # CCpy is downloaded on demand by oqp.interop.ccpy.ensure_ccpy and
+            # built with meson against LP64 OpenBLAS (its own default), which
+            # is separate from OpenQP's ILP64 libopenblas64. Installing it here,
+            # through the same function users hit, keeps the parallel test
+            # workers from starting several builds at once.
+            sudo apt-get install -y libopenblas-dev
+            python -c "from oqp.interop.ccpy import ensure_ccpy; ensure_ccpy(install=True)"
          - name: Run Python test suite
            if: ${{ matrix.role == 'pytest' }}
            env:
