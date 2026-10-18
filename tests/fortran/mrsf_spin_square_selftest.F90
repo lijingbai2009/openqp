@@ -7,7 +7,7 @@
 module mrsf_spin_square_selftest_m
   use iso_c_binding, only: c_double, c_int
   use precision, only: dp
-  use tdhf_mrsf_lib, only: umrsfssqu, mrsfssq
+  use tdhf_mrsf_lib, only: umrsfssqu, umrsfssq_quintet, mrsfssq
   implicit none
   public :: mrsf_spin_square_selftest, mrsf_spin_square_evaluate
 contains
@@ -84,14 +84,18 @@ contains
   subroutine mrsf_spin_square_evaluate(n_c, nc_c, mult_c, mo_a, mo_b, smat, x, ss) bind(C)
     integer(c_int), value, intent(in) :: n_c, nc_c, mult_c
     real(c_double), intent(in) :: mo_a(n_c,n_c), mo_b(n_c,n_c), smat(n_c*(n_c+1)/2)
-    real(c_double), intent(in) :: x(nc_c+2,n_c-nc_c,1)
+    real(c_double), intent(in) :: x(*)
     real(c_double), intent(out) :: ss
     real(dp), allocatable :: wrk1(:,:), wrk2(:)
     integer :: n, nc
     n = int(n_c); nc = int(nc_c)
     allocate(wrk1(n,n),wrk2(n))
-    call umrsfssqu(ss,mo_a,mo_b,smat,wrk1,wrk2,n,n*(n+1)/2,(nc+2)*(n-nc),1, &
-                  n,x,nc+2,nc,mult_c==1,mult_c==3)
+    if (mult_c == 5) then
+      call umrsfssq_quintet(ss,mo_a,mo_b,smat,wrk1,n,n,x,nc+2,nc,1)
+    else
+      call umrsfssqu(ss,mo_a,mo_b,smat,wrk1,wrk2,n,n*(n+1)/2,(nc+2)*(n-nc),1, &
+                    n,x,nc+2,nc,mult_c==1,mult_c==3)
+    end if
     deallocate(wrk1,wrk2)
   end subroutine mrsf_spin_square_evaluate
 end module mrsf_spin_square_selftest_m

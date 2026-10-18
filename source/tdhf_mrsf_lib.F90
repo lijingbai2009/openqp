@@ -4074,6 +4074,54 @@ contains
     deallocate(sa,overlap,core,u,t,v,r,prefix,suffix)
   end subroutine umrsfssqu
 
+  subroutine umrsfssq_quintet(ss, mo_a, mo_b, smat, wrk1, nbf, norb, bvec_mo, nocca, noccb, js)
+    use mathlib, only: unpack_f90
+    use messages, only: show_message, with_abort
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+    implicit none
+    integer, intent(in) :: nbf, norb, nocca, noccb, js
+    real(dp), intent(in) :: mo_a(:,:), mo_b(:,:), smat(:)
+    real(dp), intent(in) :: bvec_mo(noccb,norb-nocca,*)
+    real(dp), intent(inout) :: wrk1(:,:)
+    real(dp), intent(out) :: ss
+    real(dp), allocatable :: sb(:,:), overlap(:,:), t(:,:), v(:,:), r(:,:), ct(:,:)
+    real(dp) :: scale, norm, exchange, trace_r
+    integer :: nv, q, ok
+
+    ! Ms=2 beta-core -> alpha-virtual excitations of R+ are orthonormal.
+    ! S^2=6+N_beta-spin_exchange, with N_beta=Nc-1 after excitation.
+    ! For unrestricted parents S can exceed 2; a fixed 6 is valid only in the
+    ! spin-pure limit. This changes the observable, not the quintet response.
+    if (nocca /= noccb+2 .or. noccb < 1 .or. norb <= nocca) &
+      call show_message('UMRSF spin square: empty or invalid quintet response space', with_abort)
+    nv = norb-nocca
+    allocate(sb(nbf,noccb),overlap(noccb,norb),t(noccb,nv),v(noccb,nv), &
+             r(noccb,noccb),ct(nocca,nv),stat=ok)
+    if (ok /= 0) call show_message('UMRSF spin square: cannot allocate quintet workspace', with_abort)
+    call unpack_f90(smat,wrk1,'u')
+    call dgemm('N','N',nbf,noccb,nbf,1.0_dp,wrk1,nbf,mo_b,nbf,0.0_dp,sb,nbf)
+    call dgemm('T','N',noccb,norb,nbf,1.0_dp,sb,nbf,mo_a,nbf,0.0_dp,overlap,noccb)
+    scale = maxval(abs(bvec_mo(:,:,js)))
+    if (.not. ieee_is_finite(scale) .or. scale == 0.0_dp) &
+      call show_message('UMRSF spin square: zero or invalid quintet response vector', with_abort)
+    t = bvec_mo(:,:,js)/scale
+    norm = sum(t*t)
+    if (.not. ieee_is_finite(norm) .or. norm <= 0.0_dp) &
+      call show_message('UMRSF spin square: invalid quintet state norm', with_abort)
+    v = overlap(:,nocca+1:norb)
+    call dgemm('N','T',noccb,noccb,nv,1.0_dp,t,noccb,v,noccb,0.0_dp,r,noccb)
+    call dgemm('T','N',nocca,nv,noccb,1.0_dp,overlap,noccb,t,noccb,0.0_dp,ct,nocca)
+    exchange = 0.0_dp; trace_r = 0.0_dp
+    do q = 1, noccb
+      exchange = exchange+1.0_dp-sum(overlap(q,1:nocca)**2)
+      trace_r = trace_r+r(q,q)
+    end do
+    ss = 5.0_dp+exchange+(sum(ct*ct)-sum(r*r)+trace_r**2)/norm
+    if (.not. ieee_is_finite(ss)) call show_message('UMRSF spin square: nonfinite quintet expectation', with_abort)
+    deallocate(sb,overlap,t,v,r,ct)
+  end subroutine umrsfssq_quintet
+
+
 !###############################################################################
 
 !> Build UMRSF transition and unrelaxed difference density matrices

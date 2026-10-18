@@ -12,7 +12,7 @@ import sys
 import pytest
 from test_mrsf_spin_square import (
     _add, _op, _random_vector, spin_square, CH2_INPUT, S2_LINE, PRINT_ATOL,
-    _state_vectors, oqp, OQP_IMPORT_ERROR,
+    _state_vectors, oqp, OQP_IMPORT_ERROR, spin_square_general,
 )
 import numpy as np
 
@@ -75,6 +75,23 @@ def nonorthogonal_state(a, b, nc, x, mult):
                 vec = pair(i, j)
                 value /= np.sqrt(2)
             psi = _add(psi, vec, value)
+    return psi
+
+
+def nonorthogonal_quintet(a, b, nc, x):
+    """Explicit Ms=2 beta-core -> alpha-virtual determinant expansion."""
+    n = len(a); na = nc+2
+    rp = {0: 1.0}
+    for i in range(nc):
+        rp = _orbital_op(_orbital_op(rp, a[:, i], 0, True), b[:, i], 1, True)
+    for i in (nc, nc+1):
+        rp = _orbital_op(rp, a[:, i], 0, True)
+    amplitudes = np.asarray(x).reshape(n-na, nc)
+    psi = {}
+    for j in range(na, n):
+        for i in range(nc):
+            term = _orbital_op(_orbital_op(rp, b[:, i], 1, False), a[:, j], 0, True)
+            psi = _add(psi, term, amplitudes[j-na, i])
     return psi
 
 
@@ -168,7 +185,7 @@ elif CASE == 'nonfinite': x[0]=np.nan
 elif CASE in ('null','near_null'):
     b[:,[0,1]]=b[:,[1,0]]
     if CASE == 'near_null': x[4]=1e-9
-elif CASE == 'spin': mult=5
+elif CASE == 'spin': mult=7
 print(native_s2(a,b,0,x,mult))
 '''.replace('CASE', repr(case))
     env = dict(os.environ)
@@ -179,7 +196,7 @@ print(native_s2(a,b,0,x,mult))
 
 
 @pytest.mark.parametrize('molecule,nc', [('ch2', 3), ('lih', 1)])
-@pytest.mark.parametrize('mult', [1, 3])
+@pytest.mark.parametrize('mult', [1, 3, 5])
 def test_umrsf_printed_states_against_common_basis_oracle(tmp_path, molecule, nc, mult):
     from oqp.pyoqp import Runner
     deck = (CH2_INPUT.format(mult=mult).replace('basis=6-31g', 'basis=sto-3g')
@@ -187,6 +204,8 @@ def test_umrsf_printed_states_against_common_basis_oracle(tmp_path, molecule, nc
     if molecule == 'lih':
         start = deck.index('system='); end = deck.index('charge=')
         deck = deck[:start]+'system=\n  Li 0 0 0\n  H 0 0 3.0\n'+deck[end:]
+    nstate = 3 if mult == 5 else 4
+    deck = deck.replace('nstate=4', f'nstate={nstate}')
     path = tmp_path / f'{molecule}.inp'; path.write_text(deck)
     log = path.with_suffix('.log')
     runner = Runner(input_file=str(path), log=str(log))
@@ -203,11 +222,14 @@ def test_umrsf_printed_states_against_common_basis_oracle(tmp_path, molecule, nc
     aa, bb = transform@a, transform@b
     np.testing.assert_allclose(aa.T@aa, np.eye(n), atol=1e-10)
     np.testing.assert_allclose(bb.T@bb, np.eye(n), atol=1e-10)
-    vectors = _state_vectors(np.array(data['OQP::td_bvec_mo'], copy=True), 4)
+    vectors = _state_vectors(np.array(data['OQP::td_bvec_mo'], copy=True), nstate)
     printed = np.array([float(v) for v in S2_LINE.findall(log.read_text())])
-    assert len(printed) == 4
+    assert len(printed) == nstate
     assert np.max(np.abs(aa.T@bb-np.eye(n))) > 1e-3
-    exact = [spin_square(nonorthogonal_state(aa, bb, nc, x, mult), n) for x in vectors]
+    if mult == 5:
+        exact = [spin_square_general(nonorthogonal_quintet(aa, bb, nc, x), n) for x in vectors]
+    else:
+        exact = [spin_square(nonorthogonal_state(aa, bb, nc, x, mult), n) for x in vectors]
     native = [native_s2(a, b, nc, x, mult, metric) for x in vectors]
     np.testing.assert_allclose(native, exact, rtol=0, atol=1e-10)
     np.testing.assert_allclose(printed, exact, rtol=0, atol=PRINT_ATOL)
@@ -233,3 +255,69 @@ def test_occupied_and_core_rotations_change_svd_gauge(rank, mult):
     rotated_ref = spin_square(nonorthogonal_state(a, b, nc, x, mult), n)
     assert rotated_ref == pytest.approx(ref, abs=1e-12)
     assert native_s2(a, b, nc, x, mult) == pytest.approx(ref, abs=1e-12)
+
+
+@pytest.mark.parametrize('theta', [0.0, 0.2, 0.6, 1.0, np.pi/2])
+def test_quintet_contaminated_parent(theta):
+    a = np.eye(6); b = a.copy()
+    b[:, [1, 5]] = b[:, [1, 5]] @ [[np.cos(theta), -np.sin(theta)],
+                                  [np.sin(theta), np.cos(theta)]]
+    x = np.array([1.0, 0.0, 0.0, 0.0])  # beta C1 -> alpha V1
+    ref = 6+np.sin(theta)**2
+    assert spin_square_general(nonorthogonal_quintet(a, b, 2, x), 6) == pytest.approx(ref, abs=1e-12)
+    assert native_s2(a, b, 2, x, 5) == pytest.approx(ref, abs=1e-12)
+
+
+@pytest.mark.parametrize('nc,n', [(1, 4), (1, 5), (2, 5), (2, 6), (3, 7)])
+def test_quintet_cross_terms_metric_and_rotations(nc, n):
+    rng = np.random.default_rng(2515+nc+n)
+    na = nc+2; nv = n-na
+    a = np.linalg.qr(rng.normal(size=(n, n)))[0]
+    b = np.linalg.qr(rng.normal(size=(n, n)))[0]
+    mixed = rng.normal(size=nc*nv)
+    for index in range(nc*nv):
+        unit = np.zeros(nc*nv); unit[index] = 1
+        for x in (unit, mixed+unit):
+            ref = spin_square_general(nonorthogonal_quintet(a, b, nc, x), n)
+            assert native_s2(a, b, nc, x, 5) == pytest.approx(ref, abs=1e-12)
+            if nc == 1:
+                assert ref == pytest.approx(6, abs=1e-12)
+    ref = spin_square_general(nonorthogonal_quintet(a, b, nc, mixed), n)
+    for scale in (1e-150, -3.7, 1e150):
+        assert native_s2(a, b, nc, mixed*scale, 5) == pytest.approx(ref, abs=1e-12)
+    transform = rng.normal(size=(n, n))*0.1+np.diag(np.arange(1, n+1))
+    assert native_s2(np.linalg.solve(transform, a), np.linalg.solve(transform, b),
+                     nc, mixed, 5, transform.T@transform) == pytest.approx(ref, abs=1e-12)
+    # Rotate both excitation indices and counter-transform amplitudes. The
+    # occupied-alpha determinant changes only by an irrelevant overall phase.
+    u = np.linalg.qr(rng.normal(size=(nc, nc)))[0]
+    v = np.linalg.qr(rng.normal(size=(nv, nv)))[0]
+    occupied = np.linalg.qr(rng.normal(size=(na, na)))[0]
+    a[:, :na] = a[:, :na]@occupied
+    a[:, na:] = a[:, na:]@v
+    b[:, :nc] = b[:, :nc]@u
+    rotated = (u.T@mixed.reshape(nv, nc).T@v).ravel(order='F')
+    assert spin_square_general(nonorthogonal_quintet(a, b, nc, rotated), n) == pytest.approx(ref, abs=1e-12)
+    assert native_s2(a, b, nc, rotated, 5) == pytest.approx(ref, abs=1e-12)
+    # Restricted limit, including a nonsymmetric mixed vector.
+    assert native_s2(a, a, nc, mixed, 5) == pytest.approx(6, abs=1e-12)
+
+
+@pytest.mark.parametrize('case', ['zero', 'nonfinite', 'no_core', 'no_virtual'])
+def test_invalid_quintet_state_fails(case):
+    assert oqp is not None, f"compiled oqp unavailable: {OQP_IMPORT_ERROR!r}"
+    code = """
+from test_umrsf_spin_square_nonorthogonal import native_s2
+import numpy as np
+n=6; nc=2; x=np.ones(4)
+if CASE == 'zero': x[:]=0
+elif CASE == 'nonfinite': x[0]=np.nan
+elif CASE == 'no_core': nc=0
+elif CASE == 'no_virtual': n=4
+print(native_s2(np.eye(n),np.eye(n),nc,x,5))
+""".replace('CASE', repr(case))
+    env = dict(os.environ)
+    env['PYTHONPATH'] = str(Path(__file__).parent)
+    run = subprocess.run([sys.executable, '-c', code], env=env, text=True, capture_output=True)
+    assert run.returncode != 0
+    assert 'UMRSF spin square:' in run.stdout+run.stderr

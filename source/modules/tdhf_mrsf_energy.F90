@@ -413,7 +413,7 @@ contains
       mrinivec, mrsfcbc, umrsfcbc, mrsfmntoia, umrsfmntoia, mrsfesum, &
       mrsfqroesum, get_mrsf_transitions, &
       get_mrsf_transition_density, get_umrsf_transition_dipole, &
-      get_jacobi, umrsfssqu, mrsfssq, mrsf_set_fp32, mrsf_check_block_representation
+      get_jacobi, umrsfssqu, umrsfssq_quintet, mrsfssq, mrsf_set_fp32, mrsf_check_block_representation
     use mathlib, only: orthogonal_transform, orthogonal_transform_sym, &
       unpack_matrix
     use routec_sig, only: routec_sig_available, routec_sig_begin, &
@@ -1413,7 +1413,14 @@ contains
             &"Spin-adapted spin-flip excitations",/,2x,35("="))')
       case(5)
         call get_transition_density(trden, bvec_mo, nbf, noccb, nocca, nstates)
-        squared_S(:) = 6.0_dp
+        if (umrsf) then
+          do ist = 1, nstates
+            call umrsfssq_quintet(squared_S(ist),mo_a,mo_b,smat,wrk1,nbf,nbf, &
+                                  bvec_mo,nocca,noccb,ist)
+          end do
+        else
+          squared_S(:) = 6.0_dp
+        end if
         call get_transitions(trans, noccb, nocca, nbf)
         write(*,'(/,2x,35("="),/,2x,&
             &"Beta -> Alpha spin-flip excitations",/,2x,35("="))')
