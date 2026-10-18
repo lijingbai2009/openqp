@@ -3952,17 +3952,17 @@ contains
 
 !> Compute the <S^2> expectation value of a UMRSF-TDDFT response state
 !>
-!> UMRSF analogue of mrsfssq: accumulates <S^2> for state js from the
-!> response amplitudes bvec_mo and the diagonal alpha/beta MO overlaps
-!> d_k = <alpha_k|beta_k> (corresponding-orbital model), for singlet (mrsfs)
-!> or triplet (mrsft) targets.  With a = sum_{k<=noccb} d_k**2 and
-!> b = prod_{k<=noccb} d_k**2, every amplitude contributes its E+ diagonal
-!> element plus lambda times the E+/E- coupling (lambda = -1 singlet, +1
-!> triplet).  S^2 = Nb - sum_pq a+_{q,b} a+_{p,a} a_{q,a} a_{p,b} contains at
-!> most one alpha<->beta exchange, and with diagonal overlaps it couples E+ and
-!> E- only when they differ by one exchange (O->O, C->O, O->V).  A C->V pair
-!> differs in C, O1, O2 and V, so its E+/E- coupling vanishes and both
-!> multiplicities get the diagonal nocca-1-a+d_i**2 (= 2 in the ROHF limit).
+!> Evaluate the explicitly paired response state Psi=(Phi+eta F Phi)/sqrt(2),
+!> where F=Ry(pi), eta=+1/-1 for singlet/triplet parity and Phi=sum T_ia E+_ia.
+!> T is reconstructed from the packed CO, OV, CV and OO amplitudes below.
+!> Both <Phi|S^2|Phi> and <Phi|S^2 F|Phi>, and the full norm
+!> <Phi|Phi>+eta<Phi|F|Phi>, retain the complete alpha/beta MO overlap matrix.
+!> A full SVD of the occupied-alpha/core-beta overlap reduces the opposite-parent
+!> determinant cofactors to products of singular values, including exact zeros.
+!> The two complementary occupied-alpha directions must be retained.
+!> No diagonal-overlap or squared-amplitude-only approximation is made.
+!> For identical alpha/beta orbitals this reduces to mrsfssq; for unrestricted
+!> parents spin parity alone does not imply a pure total-spin eigenstate.
 !>
   subroutine umrsfssqu(ss, mo_a, mo_b, smat, wrk1, wrk2, nbf, nbf2, xvec_dim, js, &
                        norb, bvec_mo, nocca, noccb, mrsfs, mrsft)
