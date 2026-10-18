@@ -4,15 +4,12 @@
 ! reduce to the ROHF result mrsfssq, singlet 2*w_CV and triplet 2, for random
 ! vectors that populate every configuration class, including the G/D open-open
 ! slots whose normalization depends on the alpha/beta overlaps.
-! Unequal alpha/beta MOs: a vector with only core->virtual amplitudes must have
-! the same <S^2> for both multiplicities, because E+ and E- of a C->V pair differ
-! by two alpha<->beta exchanges and S^2 couples them only through one.
 module mrsf_spin_square_selftest_m
   use iso_c_binding, only: c_double, c_int
   use precision, only: dp
   use tdhf_mrsf_lib, only: umrsfssqu, mrsfssq
   implicit none
-  public :: mrsf_spin_square_selftest
+  public :: mrsf_spin_square_selftest, mrsf_spin_square_evaluate
 contains
   subroutine mrsf_spin_square_selftest(error, checks) bind(C)
     real(c_double), intent(out) :: error
@@ -66,32 +63,35 @@ contains
         checks = checks+2
       end do
 
-      ! Unequal alpha/beta MOs: C->V-only vector, singlet == triplet
+      ! A beta core/added-virtual rotation leaves their occupied wedge unchanged.
+      ! Both target parities must give exactly 2, not merely agree with each other.
       mo_b = mo_a
-      do i = 1, n-1
-        th = 0.1_dp*real(i+shape, dp)
-        mo_b(:,[i,i+1]) = matmul(mo_b(:,[i,i+1]), &
-          reshape([cos(th), sin(th), -sin(th), cos(th)], [2,2]))
-      end do
-      x = 0
-      do j = 3, nv
-        do i = 1, nb
-          x(i,j,1) = cos(real(7*i+3*j+shape, dp))
-        end do
-      end do
-      x = x/sqrt(sum(x**2))
+      th = 0.6_dp
+      mo_b(:,[nb,n]) = matmul(mo_b(:,[nb,n]), &
+        reshape([cos(th),sin(th),-sin(th),cos(th)],[2,2]))
+      x = 0; x(1,nv,1) = 1
       call umrsfssqu(ss_u, mo_a, mo_b, smat, wrk1, wrk2, n, n*(n+1)/2, na*nv, 1, &
                      n, x, na, nb, .true., .false.)
       call umrsfssqu(ss_r, mo_a, mo_b, smat, wrk1, wrk2, n, n*(n+1)/2, na*nv, 1, &
                      n, x, na, nb, .false., .true.)
-      ! the alpha/beta overlaps must be non-trivial (a single core orbital
-      ! gives exactly 2 for any overlaps, so test the overlaps themselves)
-      if (minval([(abs(dot_product(mo_a(:,k), mo_b(:,k))), k = 1, na)]) > 0.99_dp) &
-        error = max(error, 1.0_dp)
-      error = max(error, abs(ss_u-ss_r))
+      error = max(error, abs(ss_u-2), abs(ss_r-2))
       checks = checks+1
 
       deallocate(mo_a, mo_b, smat, wrk1, wrk2, x)
     end do
   end subroutine mrsf_spin_square_selftest
+  ! Test interface to the same AO-overlap/MO/packed-vector route used after Davidson.
+  subroutine mrsf_spin_square_evaluate(n_c, nc_c, mult_c, mo_a, mo_b, smat, x, ss) bind(C)
+    integer(c_int), value, intent(in) :: n_c, nc_c, mult_c
+    real(c_double), intent(in) :: mo_a(n_c,n_c), mo_b(n_c,n_c), smat(n_c*(n_c+1)/2)
+    real(c_double), intent(in) :: x(nc_c+2,n_c-nc_c,1)
+    real(c_double), intent(out) :: ss
+    real(dp), allocatable :: wrk1(:,:), wrk2(:)
+    integer :: n, nc
+    n = int(n_c); nc = int(nc_c)
+    allocate(wrk1(n,n),wrk2(n))
+    call umrsfssqu(ss,mo_a,mo_b,smat,wrk1,wrk2,n,n*(n+1)/2,(nc+2)*(n-nc),1, &
+                  n,x,nc+2,nc,mult_c==1,mult_c==3)
+    deallocate(wrk1,wrk2)
+  end subroutine mrsf_spin_square_evaluate
 end module mrsf_spin_square_selftest_m

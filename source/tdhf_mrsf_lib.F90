@@ -3966,99 +3966,112 @@ contains
 !>
   subroutine umrsfssqu(ss, mo_a, mo_b, smat, wrk1, wrk2, nbf, nbf2, xvec_dim, js, &
                        norb, bvec_mo, nocca, noccb, mrsfs, mrsft)
-
     use mathlib, only: unpack_f90
-    use precision, only: dp
-
+    use messages, only: show_message, with_abort
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
     implicit none
-
+    integer, intent(in) :: nbf, nbf2, xvec_dim, js, norb, nocca, noccb
     logical, intent(in) :: mrsfs, mrsft
-    integer :: i, j, js, nocca, noccb, nbf, nbf2, xvec_dim, norb
-    real(kind=dp), intent(in),    dimension(:,:) :: mo_a, mo_b
-    real(kind=dp), intent(in),    dimension(:)   :: smat
-    real(kind=dp), intent(inout), dimension(:,:) :: wrk1
-    real(kind=dp), intent(inout), dimension(:)   :: wrk2
-    real(kind=dp), intent(in),    dimension(nocca, norb-noccb, *) :: bvec_mo
-    real(kind=dp), intent(out) :: ss
-    real(kind=dp), parameter :: half = 0.5d+00
-    real(kind=dp), parameter :: tol = 1.0d-12
+    real(dp), intent(in) :: mo_a(:,:), mo_b(:,:), smat(:)
+    real(dp), intent(in) :: bvec_mo(nocca,norb-noccb,*)
+    real(dp), intent(inout) :: wrk1(:,:), wrk2(:)
+    real(dp), intent(out) :: ss
+    real(dp), allocatable :: sa(:,:), overlap(:,:), core(:,:), u(:,:), t(:,:), v(:,:), r(:,:), work(:)
+    real(dp), allocatable :: prefix(:), suffix(:)
+    real(dp) :: query(1), unused_vt(1,1), scale, eta, norm, cross_norm, same, cross, physical_norm
+    real(dp) :: product_all, product_except, fuv, cross_coefficient, trace_r
+    integer :: nv, o1, o2, q, info, lwork, ok
 
-    real(kind=dp) :: a, b, c, dum, f
-
+    ! Observable of Psi=(Phi+eta Ry(pi)Phi)/sqrt(2), Phi=sum T_ia E+_ia.
+    ! The packed OO fold below defines the paired-state extension to UMRSF.
+    ! Spin parity eta does not imply a pure total spin for unrestricted MOs.
+    ! Keep all alpha/beta overlaps and configuration cross terms. A diagonal
+    ! overlap approximation fails even for a single C->V excitation.
+    if (nocca /= noccb+2 .or. norb < nocca .or. (mrsfs .eqv. mrsft)) &
+      call show_message('UMRSF spin square: invalid two-SOMO spin sector', with_abort)
+    nv = norb-noccb; o1 = noccb+1; o2 = noccb+2
+    allocate(sa(nbf,nocca), overlap(nocca,norb), core(nocca,noccb), u(nocca,nocca), &
+             t(nocca,nv), v(nocca,nv), r(nocca,nocca), &
+             prefix(0:noccb), suffix(1:noccb+1), stat=ok)
+    if (ok /= 0) call show_message('UMRSF spin square: cannot allocate memory', with_abort)
     call unpack_f90(smat, wrk1, 'u')
-
-    ! Precalculation of diagonal alpha/beta MO overlaps
-    a = 0
-    b = 1
-    c = 0
-    do i = 1, nocca
-      dum = dot_product( mo_a(:,i), matmul(wrk1, mo_b(:,i)) )
-      wrk2(i) = dum
-      if (i > noccb) then
-        cycle
-      else
-        a = a+dum*dum
-        b = b*dum*dum
-        c = c+(1.0_dp/max((dum*dum),tol))
-      end if
-    end do
-
-    f = 1
+    call dgemm('N','N',nbf,nocca,nbf,1.0_dp,wrk1,nbf,mo_a,nbf,0.0_dp,sa,nbf)
+    call dgemm('T','N',nocca,norb,nbf,1.0_dp,sa,nbf,mo_b,nbf,0.0_dp,overlap,nocca)
+    eta = -1.0_dp
+    if (mrsfs) eta = 1.0_dp
+    scale = maxval(abs(bvec_mo(:,:,js)))
+    if (.not. ieee_is_finite(scale) .or. scale == 0.0_dp) &
+      call show_message('UMRSF spin square: zero or invalid response vector', with_abort)
+    t = bvec_mo(:,:,js)/scale
+    t(o2,2) = -eta*t(o1,1)*0.5_dp
+    t(o1,1) = t(o1,1)*0.5_dp
     if (mrsfs) then
-      ! Singlet spin quantum number
-      ss = 0
-      do i = 1, nocca
-        do j = 1, norb-noccb
-          ! cv
-          if ((j > 2).and.(i <= noccb)) then
-            ss = ss + (nocca-1-a + (wrk2(i))**2) * (bvec_mo(i,j,js))**2
-          ! co
-          else if (i <= noccb) then
-            ss = ss + (nocca-1-a + (wrk2(i))**2 - (wrk2(j+noccb))**2 &
-              - b * ((wrk2(j+noccb)) / max(abs(wrk2(i)), tol))**2) &
-              * (bvec_mo(i,j,js))**2
-          ! ov, os
-          else if ((j > 2) .or. (i == noccb+j)) then
-            ss = ss+(nocca-1-a-b)*(bvec_mo(i,j,js))**2
-          ! g, d
-          else
-            ss = ss + half * (nocca-1-a - (wrk2(noccb+j))**2 &
-             + (wrk2(noccb+j))**2 * b * (nocca-1-c - 1.0d0 / &
-             (max(abs(wrk2(noccb+j)), tol))**2)) &
-             * (bvec_mo(i,j,js))**2
-
-            ! <G+|G-> = b d_O**2 normalizes (G+ + G-)/2 (1 in the ROHF limit)
-            f = f+half*(-1+b*(wrk2(noccb+j))**2)*(bvec_mo(i,j,js))**2
-          end if
-        end do
-      end do
-
-    else if (mrsft) then
-      ! Triplet spin quantum number
-      ss = 0
-      do i = 1, nocca
-        do j = 1, norb-noccb
-          ! cv
-          if ((j > 2).and.(i <= noccb)) then
-            ss = ss + (nocca-1 - a + (wrk2(i))**2) * (bvec_mo(i,j,js))**2
-          ! co
-          else if (i <= noccb) then
-            ss = ss + (nocca-1 - a + (wrk2(i))**2 - (wrk2(j+noccb))**2 &
-                  + b * ( (wrk2(j+noccb) / &
-                  max(abs(wrk2(i)),tol))**2 )) * (bvec_mo(i,j,js))**2
-          ! ov, ot
-          else if ((j > 2) .or. (i == noccb+j)) then
-            ss = ss+(nocca-1-a+b)*(bvec_mo(i,j,js))**2
-          end if
-        end do
-      end do
+      t(o2,1) = t(o2,1)/sqrt(2.0_dp)
+      t(o1,2) = t(o1,2)/sqrt(2.0_dp)
+    else
+      t(o2,1) = 0.0_dp; t(o1,2) = 0.0_dp
     end if
 
-    ! Normalization
-    ss = ss/f
+    ! Full U includes the TWO complementary occupied-alpha directions. The
+    ! SVD is only a coordinate change inside this observable, not an MO rotation
+    ! in the caller. Cofactor products remain defined at zero singular values.
+    u = 0.0_dp
+    do q = 1, nocca
+      u(q,q) = 1.0_dp
+    end do
+    if (noccb > 0) then
+      core = overlap(:,1:noccb)
+      call dgesvd('A','N',nocca,noccb,core,nocca,wrk2,u,nocca,unused_vt,1,query,-1,info)
+      if (info /= 0) call show_message('UMRSF spin square: SVD workspace query failed', with_abort)
+      lwork = max(1,int(query(1)))
+      allocate(work(lwork), stat=ok)
+      if (ok /= 0) call show_message('UMRSF spin square: cannot allocate SVD workspace', with_abort)
+      core = overlap(:,1:noccb)
+      call dgesvd('A','N',nocca,noccb,core,nocca,wrk2,u,nocca,unused_vt,1,work,lwork,info)
+      if (info /= 0) call show_message('UMRSF spin square: SVD did not converge', with_abort)
+      deallocate(work)
+    end if
+    v = matmul(transpose(u),overlap(:,noccb+1:norb))
+    t = matmul(transpose(u),t)
+    call dgemm('N','T',nocca,nocca,nv,1.0_dp,t,nocca,v,nocca,0.0_dp,r,nocca)
+    norm = sum(t*t)
+    trace_r = 0.0_dp
+    do q = 1, nocca
+      trace_r = trace_r+r(q,q)
+    end do
+    same = (1.0_dp+sum(1.0_dp-wrk2(1:noccb)**2))*norm-sum(r*r)+trace_r**2
+    do q = 1, noccb
+      same = same+wrk2(q)**2*sum(t(q,:)**2)
+    end do
 
-    return
-
+    prefix(0) = 1.0_dp; suffix(noccb+1) = 1.0_dp
+    do q = 1, noccb
+      prefix(q) = prefix(q-1)*wrk2(q)**2
+    end do
+    do q = noccb, 1, -1
+      suffix(q) = suffix(q+1)*wrk2(q)**2
+    end do
+    product_all = prefix(noccb)
+    fuv = r(o1,o2)**2+r(o2,o1)**2-2.0_dp*r(o1,o1)*r(o2,o2)
+    cross_norm = product_all*fuv
+    cross_coefficient = product_all
+    cross = -product_all*(sum(t(o1,:)**2)+sum(t(o2,:)**2))
+    do q = 1, noccb
+      product_except = prefix(q-1)*suffix(q+1)
+      cross_coefficient = cross_coefficient+(wrk2(q)**2-1.0_dp)*product_except
+      cross = cross-product_except*(r(q,o1)**2+r(o1,q)**2-2.0_dp*r(q,q)*r(o1,o1) &
+                                   +r(q,o2)**2+r(o2,q)**2-2.0_dp*r(q,q)*r(o2,o2))
+    end do
+    cross = cross+cross_coefficient*fuv
+    physical_norm = norm+eta*cross_norm
+    ! A nonzero packed vector can map to a null paired state. Never replace its
+    ! norm by a floor or report a spurious finite expectation value.
+    if (.not. ieee_is_finite(physical_norm) .or. &
+        physical_norm <= 64.0_dp*epsilon(norm)*norm) &
+      call show_message('UMRSF spin square: null or ill-conditioned paired-state norm', with_abort)
+    ss = (same+eta*cross)/physical_norm
+    if (.not. ieee_is_finite(ss)) call show_message('UMRSF spin square: nonfinite expectation', with_abort)
+    deallocate(sa,overlap,core,u,t,v,r,prefix,suffix)
   end subroutine umrsfssqu
 
 !###############################################################################
