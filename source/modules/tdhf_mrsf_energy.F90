@@ -1194,6 +1194,7 @@ contains
 
         else if( mrst==5 )then
 
+          ! First MO set supplies beta occupieds; second supplies alpha virtuals.
           call mntoia(int2_data_q%amb(:,:,iv,1), amo(:,ivec), mo_b, mo_a, noccb, nocca)
 
           ! Z(I+,A-)

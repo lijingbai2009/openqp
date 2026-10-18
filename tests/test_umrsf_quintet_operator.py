@@ -66,7 +66,8 @@ def test_complete_quintet_operator(tmp_path, reference, response, functional, ex
     data = runner.mol.data
     a = np.array(data['OQP::VEC_MO_A'], copy=True).T
     b = np.array(data['OQP::VEC_MO_B'], copy=True).T
-    n = len(a); nc = 3
+    assert data['nelec_A'] == 5 and data['nelec_B'] == 3
+    n = len(a); nc = int(data['nelec_B'])
     assert dimension == nc*(n-nc-2)
     fa = _unpack(data['OQP::FOCK_A'], n)
     fb = _unpack(data['OQP::FOCK_B'], n)
@@ -97,6 +98,8 @@ def test_complete_quintet_operator(tmp_path, reference, response, functional, ex
     np.testing.assert_allclose(rotated, transform.T@expected@transform, rtol=0, atol=1e-12, equal_nan=False)
     # Exercise the production driver in the rotated basis, not only the oracle.
     # Both reference densities stay unchanged, so the AO Fock and ERIs remain valid.
+    # Stored orbital energies enter the initial vectors/preconditioner, but the
+    # complete response space is spanned here and sigma uses the full MO Fock.
     data['OQP::VEC_MO_A'][:] = ar.T
     data['OQP::VEC_MO_B'][:] = br.T
     getattr(oqp, f'tdhf_{response}_energy')(runner.mol)
@@ -113,3 +116,62 @@ def test_complete_quintet_operator(tmp_path, reference, response, functional, ex
                                rtol=0, atol=1e-9, equal_nan=False)
     if reference == 'uhf':
         assert np.max(abs(a-b)) > 1e-3
+    else:
+        np.testing.assert_allclose(a, b, rtol=0, atol=1e-12, equal_nan=False)
+
+
+@pytest.mark.parametrize('reference,response', [('uhf', 'umrsf'), ('rohf', 'mrsf')])
+def test_cam_quintet_rotation_covariance(tmp_path, reference, response):
+    """Native CAM operator covariance, separate from the bare-ERI oracle above.
+
+    CAM exchange is alpha/r + beta*erf(mu*r)/r; eri_ao exports only 1/r.
+    Reconstruct the complete native matrix, then compare its transformation
+    with an independent driver run on rotated core and virtual orbitals.
+    """
+    from oqp.pyoqp import Runner
+    path = tmp_path/'ch2-cam.inp'
+    path.write_text(DECK.format(reference=reference, response=response,
+                               functional='cam-b3lyp', basis='sto-3g', states=6))
+    runner = Runner(input_file=str(path), log=str(path.with_suffix('.log')))
+    runner.run()
+    data = runner.mol.data
+    assert data['nelec_A'] == 5 and data['nelec_B'] == 3
+    assert data['hamilton'] == 20
+    assert data['dft'].cam_flag
+    np.testing.assert_allclose([data['cam_alpha'], data['cam_beta'], data['cam_mu']],
+                               [0.19, 0.46, 0.33], rtol=0, atol=1e-12, equal_nan=False)
+
+    def eigensystem():
+        assert runner.mol.mol_energy.Davidson_converged
+        e = np.array(data['OQP::td_energies'], copy=True).ravel()
+        x = np.array(data['OQP::td_bvec_mo'], copy=True).reshape(6, 6).T
+        assert e.shape == (6,)
+        assert np.isfinite(e).all() and np.isfinite(x).all()
+        np.testing.assert_allclose(x.T@x, np.eye(6), rtol=0, atol=1e-10, equal_nan=False)
+        return e, x
+
+    e, x = eigensystem()
+    a = np.array(data['OQP::VEC_MO_A'], copy=True).T
+    b = np.array(data['OQP::VEC_MO_B'], copy=True).T
+    assert np.isfinite(a).all() and np.isfinite(b).all()
+    if reference == 'uhf':
+        assert np.max(abs(a-b)) > 1e-3
+    else:
+        np.testing.assert_allclose(a, b, rtol=0, atol=1e-12, equal_nan=False)
+    rng = np.random.default_rng(522)
+    uc = np.linalg.qr(rng.normal(size=(3, 3)))[0]
+    uv = np.linalg.qr(rng.normal(size=(2, 2)))[0]
+    transform = np.kron(uv, uc)
+    expected = transform.T@((x*e)@x.T)@transform
+    assert np.isfinite(expected).all()
+    # AO densities/Fock are invariant. Stored energies only seed/precondition
+    # the solver; all six response directions are present in this test.
+    for key, orbitals in [('OQP::VEC_MO_A', a), ('OQP::VEC_MO_B', b)]:
+        orbitals[:, :3] = orbitals[:, :3]@uc
+        orbitals[:, 5:] = orbitals[:, 5:]@uv
+        data[key][:] = orbitals.T
+    getattr(oqp, f'tdhf_{response}_energy')(runner.mol)
+    er, xr = eigensystem()
+    np.testing.assert_allclose(er, e, rtol=0, atol=1e-9, equal_nan=False)
+    np.testing.assert_allclose(expected@xr, xr*er, rtol=0, atol=1e-9, equal_nan=False)
+    np.testing.assert_allclose((xr*er)@xr.T, expected, rtol=0, atol=1e-9, equal_nan=False)
