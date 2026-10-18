@@ -683,6 +683,17 @@ $$$$
                 job.ccpy()
         self.assertEqual(calls, [])
 
+    def test_workflow_namespace_exposes_ccpy(self):
+        from unittest import mock
+        openqp = load_openqp_module()
+        openqp.Runner.instances.clear()
+        job = openqp.OpenQP(project="h2o_wf").molecule(geometry="water", basis="sto-3g")
+        calls = []
+        with mock.patch.dict(sys.modules, self._fake_ccpy_interop(calls)):
+            self.assertEqual(job.workflow.ccpy(nfrozen=1), "driver")
+        self.assertEqual(calls, [(openqp.Runner.instances[0].mol,
+                                  {"nfrozen": 1, "ndelete": 0})])
+
     def test_ccpy_helper_rejects_a_non_hf_job_before_running(self):
         from unittest import mock
         openqp = load_openqp_module()

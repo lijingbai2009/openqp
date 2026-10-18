@@ -539,6 +539,8 @@ class _WorkflowProxy:
         # Gas-phase by default; combine with job.qmmm(...) for QM/MM NAMD and
         # pass soc=True (with optional soc_basis) for SOC-NAMD.
         object.__setattr__(self, "namd", _WorkflowNAMDProxy(owner))
+        # External CCpy coupled cluster on the HF orbitals; returns the driver.
+        object.__setattr__(self, "ccpy", owner.ccpy)
 
     def __call__(self, runtype=None, **kwargs):
         return self._owner._control(
