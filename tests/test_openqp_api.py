@@ -640,22 +640,36 @@ $$$$
     def test_ccpy_helper_runs_the_hf_reference_then_returns_the_driver(self):
         from unittest import mock
         openqp = load_openqp_module()
+        runner_cls = openqp.Runner
+        runner_cls.instances.clear()
         job = openqp.OpenQP(project="h2o_ccpy").molecule(geometry="water", basis="cc-pvdz")
-        runs, calls = [], []
-
-        def fake_run(run_type=None):
-            runs.append(job.to_input_dict()["input"]["method"])
-            job.mol = "mol"
-            return job.mol
-
-        job.run = fake_run
+        calls = []
         with mock.patch.dict(sys.modules, self._fake_ccpy_interop(calls)):
-            driver = job.ccpy(nfrozen=1)
-            self.assertEqual(driver, "driver")
-            job.ccpy()                                    # reuses the finished run
-        self.assertEqual(runs, ["hf"])
-        self.assertEqual(calls, [("mol", {"nfrozen": 1, "ndelete": 0}),
-                                 ("mol", {"nfrozen": 0, "ndelete": 0})])
+            self.assertEqual(job.ccpy(nfrozen=1), "driver")
+            job.ccpy()                                    # unchanged: reuses the run
+        self.assertEqual(len(runner_cls.instances), 1)
+        self.assertTrue(runner_cls.instances[0].ran)
+        self.assertEqual(runner_cls.instances[0].input_dict["input"]["method"], "hf")
+        first_mol = runner_cls.instances[0].mol
+        self.assertEqual(calls, [(first_mol, {"nfrozen": 1, "ndelete": 0}),
+                                 (first_mol, {"nfrozen": 0, "ndelete": 0})])
+
+    def test_ccpy_helper_reruns_after_the_job_changes(self):
+        """job.run(); job.molecule(new); job.ccpy() must not reuse the old
+        molecule's integrals and orbitals."""
+        from unittest import mock
+        openqp = load_openqp_module()
+        runner_cls = openqp.Runner
+        runner_cls.instances.clear()
+        job = openqp.OpenQP(project="h2_ccpy").molecule("H 0 0 0; H 0 0 0.74", basis="sto-3g")
+        job.run()
+        job.molecule("H 0 0 0; H 0 0 1.40", basis="sto-3g")
+        calls = []
+        with mock.patch.dict(sys.modules, self._fake_ccpy_interop(calls)):
+            job.ccpy()
+        self.assertEqual(len(runner_cls.instances), 2)
+        self.assertIn("1.4", runner_cls.instances[1].input_dict["input"]["system"])
+        self.assertIs(calls[0][0], runner_cls.instances[1].mol)
 
     def test_ccpy_helper_rejects_a_non_hf_job_before_running(self):
         from unittest import mock

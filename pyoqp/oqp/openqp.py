@@ -615,6 +615,7 @@ class OpenQP:
         self.unit = "Angstrom"
         self.runner = None
         self.mol = None
+        self._mol_config = None
         self.theory = _TheoryProxy(self)
         self.workflow = _WorkflowProxy(self)
         self.settings = _SettingsProxy(self)
@@ -1208,7 +1209,8 @@ class OpenQP:
     def ccpy(self, nfrozen=0, ndelete=0, **kwargs):
         """Return a driver of the external CCpy coupled-cluster library.
 
-        Runs the job first when it has not run yet; the job must then be a
+        Runs the job first when it has not run yet, or when its configuration
+        changed since the last run; the job must then be a
         Hartree-Fock (RHF, ROHF or UHF) single point, the default of
         ``molecule(...)``. CCpy is downloaded on first use; see
         :mod:`oqp.interop.ccpy`. Unlike the setup helpers this returns the
@@ -1217,7 +1219,10 @@ class OpenQP:
             driver = OpenQP("h2o").molecule(geometry="water", basis="cc-pvdz").ccpy(nfrozen=1)
             driver.run_cc(method="ccsd")
         """
-        if self.mol is None:
+        # Reuse a finished run only when the job has not been changed since;
+        # set()/molecule() edit config_str but leave the old integrals,
+        # orbitals and SCF energy on self.mol.
+        if self.mol is None or self._mol_config != self.config_str:
             config = self.config_str
             method = str(config.get("input", {}).get("method", "hf")).lower()
             functional = str(config.get("input", {}).get("functional", "") or "")
@@ -2297,6 +2302,9 @@ class OpenQP:
         )
         self.runner.run()
         self.mol = self.runner.mol
+        # The configuration this molecule was computed with; consumers of the
+        # finished run (ccpy) compare it with the current one.
+        self._mol_config = deepcopy(self.config_str)
         return self.mol
 
     def _canonicalize_key_value(self, key, value):
