@@ -203,6 +203,32 @@ def test_windows_install_lock_waits_past_lk_lock_timeouts(monkeypatch, tmp_path)
     assert attempts == [fake.LK_LOCK] * 3 + [fake.LK_UNLCK]
 
 
+class _CountData:
+    """mol.data stand-in with only the counts: no integrals, no orbitals."""
+
+    def __init__(self, nbf, na, nb):
+        self._basis, self._items = {"nbf": nbf}, {"nelec_A": [na], "nelec_B": [nb]}
+
+    def get_basis(self):
+        return self._basis
+
+    def __getitem__(self, key):
+        return self._items[key]
+
+
+@pytest.mark.parametrize("kwargs, match", [({"nfrozen": 2}, "nfrozen=2 exceeds"),
+                                           ({"ndelete": 2}, "ndelete=2 exceeds")])
+def test_orbital_count_limits_are_checked_before_installing(monkeypatch, kwargs, match):
+    monkeypatch.setattr(ccpy_interop, "ensure_ccpy",
+                        lambda *a, **k: pytest.fail("installed before validation"))
+    monkeypatch.setattr(ccpy_interop, "_openqp_ao_data",
+                        lambda mol: pytest.fail("built integrals before validation"))
+    mol = types.SimpleNamespace(config={"scf": {"type": "rohf"}, "input": {}},
+                                data=_CountData(nbf=3, na=2, nb=1))
+    with pytest.raises(ValueError, match=match):
+        ccpy_interop.hamiltonian_from_openqp(mol, **kwargs)
+
+
 def test_negative_frozen_or_deleted_orbitals_are_rejected(monkeypatch):
     monkeypatch.setattr(ccpy_interop, "ensure_ccpy",
                         lambda *a, **k: pytest.fail("checked after ensure_ccpy"))
@@ -235,6 +261,7 @@ def _fake_ccpy_models(monkeypatch, seen):
     monkeypatch.setattr(ccpy_interop, "ensure_ccpy", lambda *a, **k: None)
     monkeypatch.setattr(ccpy_interop, "_check_reference", lambda *a: None)
     monkeypatch.setattr(ccpy_interop, "_scf_energy", lambda mol: 0.0)
+    monkeypatch.setattr(ccpy_interop, "_counts", lambda mol: (3, 1, 0))
     n = 3
     monkeypatch.setattr(ccpy_interop, "_openqp_ao_data", lambda mol: {
         "nbf": n, "hcore": np.eye(n), "v_ao": np.zeros((n, n, n, n)),

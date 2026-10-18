@@ -235,14 +235,19 @@ def _count(mol, key):
     return int(np.asarray(mol.data[key]).ravel()[0])
 
 
+def _counts(mol):
+    """(nbf, n_alpha, n_beta) of a finished OpenQP run, without any integrals."""
+    basis = mol.data.get_basis()
+    if not basis:
+        raise RuntimeError("No basis available; run the OpenQP SCF first.")
+    return int(basis["nbf"]), _count(mol, "nelec_A"), _count(mol, "nelec_B")
+
+
 def _openqp_ao_data(mol):
     from oqp.library.ints_2e import eri_ao
     from oqp.quantum.integrals import unpack_triangular
 
-    basis = mol.data.get_basis()
-    if not basis:
-        raise RuntimeError("No basis available; run the OpenQP SCF first.")
-    nbf = int(basis["nbf"])
+    nbf, _, _ = _counts(mol)
     return {
         "nbf": nbf,
         "hcore": unpack_triangular(mol.data["OQP::Hcore"], nbf),
@@ -312,6 +317,16 @@ def hamiltonian_from_openqp(mol, nfrozen=0, ndelete=0, reference=None,
             f"{mol.config['input']['functional']!r}.")
     if nfrozen < 0 or ndelete < 0:
         raise ValueError(f"nfrozen={nfrozen} and ndelete={ndelete} must be >= 0.")
+    # Everything that can reject the request is checked here, from cheap
+    # counts, before CCpy is downloaded or the nbf**4 integrals are built.
+    norb, na, nb = _counts(mol)
+    if nfrozen > nb:
+        raise ValueError(f"nfrozen={nfrozen} exceeds the {nb} doubly occupied "
+                         "(beta) orbitals.")
+    if ndelete > norb - na:
+        raise ValueError(f"ndelete={ndelete} exceeds the {norb - na} virtual "
+                         "(alpha) orbitals.")
+    e_scf = _scf_energy(mol)
     ensure_ccpy()
     from ccpy.energy.hf_energy import calc_hf_energy, calc_hf_frozen_core_energy
     from ccpy.interfaces.fcidump_tools import build_rohf_fock
@@ -319,16 +334,8 @@ def hamiltonian_from_openqp(mol, nfrozen=0, ndelete=0, reference=None,
     from ccpy.models.system import System, UHFSystem
 
     d = _openqp_ao_data(mol)
-    na, nb, norb = d["na"], d["nb"], d["nbf"]
-    if nfrozen > nb:
-        raise ValueError(f"nfrozen={nfrozen} exceeds the {nb} doubly occupied "
-                         "(beta) orbitals.")
-    if ndelete > norb - na:
-        raise ValueError(f"ndelete={ndelete} exceeds the {norb - na} virtual "
-                         "(alpha) orbitals.")
     nelec, mult = na + nb, na - nb + 1
     charge = int(mol.config["input"].get("charge", 0) or 0)
-    e_scf = _scf_energy(mol)
 
     if ref == "uhf":
         occ = {"a": np.array([1.0] * na + [0.0] * (norb - na)),
