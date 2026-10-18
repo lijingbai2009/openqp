@@ -301,6 +301,11 @@ def hamiltonian_from_openqp(mol, nfrozen=0, ndelete=0, reference=None,
     if ref not in ("rhf", "rohf", "uhf"):
         raise ValueError(
             f"CCpy needs an RHF, ROHF or UHF reference; got [scf] type={ref!r}.")
+    method = str(mol.config["input"].get("method", "hf")).lower()
+    if method != "hf":
+        raise ValueError(
+            f"CCpy needs the molecule of a method=hf run; got method={method!r}, "
+            "whose stored energy is not the SCF energy.")
     if mol.config["input"].get("functional"):
         raise ValueError(
             "CCpy needs Hartree-Fock orbitals; the OpenQP SCF used functional="

@@ -671,6 +671,18 @@ $$$$
         self.assertIn("1.4", runner_cls.instances[1].input_dict["input"]["system"])
         self.assertIs(calls[0][0], runner_cls.instances[1].mol)
 
+    def test_ccpy_helper_rejects_a_finished_non_hf_job(self):
+        """job.ccsd().run(); job.ccpy() must be refused, not reuse the run."""
+        from unittest import mock
+        openqp = load_openqp_module()
+        job = openqp.OpenQP(project="h2o_ccsd").molecule(geometry="water", basis="sto-3g")
+        job.ccsd().run()
+        calls = []
+        with mock.patch.dict(sys.modules, self._fake_ccpy_interop(calls)):
+            with self.assertRaises(ValueError):
+                job.ccpy()
+        self.assertEqual(calls, [])
+
     def test_ccpy_helper_rejects_a_non_hf_job_before_running(self):
         from unittest import mock
         openqp = load_openqp_module()

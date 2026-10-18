@@ -427,6 +427,15 @@ def test_dft_orbitals_are_rejected_before_ccpy_is_needed(monkeypatch):
         ccpy_interop.hamiltonian_from_openqp(mol)
 
 
+def test_correlated_run_is_rejected_before_ccpy_is_needed(monkeypatch):
+    monkeypatch.setattr(ccpy_interop, "ensure_ccpy",
+                        lambda *a, **k: pytest.fail("checked after ensure_ccpy"))
+    mol = types.SimpleNamespace(config={"scf": {"type": "rhf"},
+                                        "input": {"method": "ccsd"}})
+    with pytest.raises(ValueError, match="method=hf"):
+        ccpy_interop.hamiltonian_from_openqp(mol)
+
+
 def test_unsupported_reference_is_rejected(monkeypatch):
     monkeypatch.setattr(ccpy_interop, "ensure_ccpy",
                         lambda *a, **k: pytest.fail("checked after ensure_ccpy"))

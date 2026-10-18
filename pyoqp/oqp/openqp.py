@@ -1222,15 +1222,17 @@ class OpenQP:
         # Reuse a finished run only when the job has not been changed since;
         # set()/molecule() edit config_str but leave the old integrals,
         # orbitals and SCF energy on self.mol.
-        if self.mol is None or self._mol_config != self.config_str:
-            config = self.config_str
-            method = str(config.get("input", {}).get("method", "hf")).lower()
-            functional = str(config.get("input", {}).get("functional", "") or "")
-            if method != "hf" or functional:
-                raise ValueError(
-                    "OpenQP.ccpy() needs a Hartree-Fock reference: use method='hf' "
-                    f"without a functional (got method={method!r}, "
-                    f"functional={functional!r}).")
+        # Checked for a finished run too: a completed method=ccsd job holds a
+        # correlated energy, and nothing may be downloaded for it.
+        config = self.config_str
+        method = str(config.get("input", {}).get("method", "hf")).lower()
+        functional = str(config.get("input", {}).get("functional", "") or "")
+        if method != "hf" or functional:
+            raise ValueError(
+                "OpenQP.ccpy() needs a Hartree-Fock reference: use method='hf' "
+                f"without a functional (got method={method!r}, "
+                f"functional={functional!r}).")
+        if self.mol is None or self._mol_config != config:
             self.run()
         from oqp.interop.ccpy import driver_from_openqp
         return driver_from_openqp(self.mol, nfrozen=nfrozen, ndelete=ndelete, **kwargs)
