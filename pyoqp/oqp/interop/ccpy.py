@@ -322,6 +322,7 @@ def hamiltonian_from_openqp(mol, nfrozen=0, ndelete=0, reference=None,
         raise ValueError(f"ndelete={ndelete} exceeds the {norb - na} virtual "
                          "(alpha) orbitals.")
     nelec, mult = na + nb, na - nb + 1
+    charge = int(mol.config["input"].get("charge", 0) or 0)
     e_scf = _scf_energy(mol)
 
     if ref == "uhf":
@@ -330,7 +331,7 @@ def hamiltonian_from_openqp(mol, nfrozen=0, ndelete=0, reference=None,
         system = UHFSystem(
             nelec, norb, mult, nfrozen, ndelete=ndelete, point_group="C1",
             orbital_symmetries={"a": ["A"] * norb, "b": ["A"] * norb},
-            nuclear_repulsion=d["vnn"],
+            charge=charge, nuclear_repulsion=d["vnn"],
             mo_energies={"a": d["ea"], "b": d["eb"]}, mo_occupation=occ)
         e_ref = _uhf_energy(d["hcore"], d["v_ao"], d["ca"], d["cb"], na, nb) + d["vnn"]
         _check_reference("UHF", e_ref, e_scf)
@@ -344,7 +345,8 @@ def hamiltonian_from_openqp(mol, nfrozen=0, ndelete=0, reference=None,
     e2int = np.asfortranarray(np.einsum("ijkl,ip,jq,kr,ls->pqrs", d["v_ao"], c, c, c, c,
                                         optimize=True))
     system = System(nelec, norb, mult, nfrozen, ndelete=ndelete, point_group="C1",
-                    orbital_symmetries=["A"] * norb, nuclear_repulsion=d["vnn"],
+                    orbital_symmetries=["A"] * norb, charge=charge,
+                    nuclear_repulsion=d["vnn"],
                     mo_energies=d["ea"])
     if ref == "rohf":
         system.mo_energies, _ = build_rohf_fock(e1int, e2int, system,

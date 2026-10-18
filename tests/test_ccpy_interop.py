@@ -211,6 +211,47 @@ def test_negative_frozen_or_deleted_orbitals_are_rejected(monkeypatch):
         ccpy_interop.hamiltonian_from_openqp(mol, nfrozen=-1)
 
 
+def _fake_ccpy_models(monkeypatch, seen):
+    """Minimal stand-ins for the CCpy modules hamiltonian_from_openqp imports."""
+    def module(name, **attrs):
+        mod = types.ModuleType(name)
+        mod.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    def system(kind):
+        def make(*args, **kwargs):
+            seen[kind] = kwargs
+            return types.SimpleNamespace()
+        return make
+
+    for name in ("ccpy", "ccpy.energy", "ccpy.interfaces", "ccpy.models"):
+        module(name)
+    module("ccpy.energy.hf_energy", calc_hf_energy=lambda *a: 0.0,
+           calc_hf_frozen_core_energy=lambda *a: 0.0)
+    module("ccpy.interfaces.fcidump_tools", build_rohf_fock=lambda *a: (None, None))
+    module("ccpy.models.integrals", getHamiltonian=lambda *a: "H",
+           getUHFHamiltonian=lambda *a: "H")
+    module("ccpy.models.system", System=system("System"), UHFSystem=system("UHFSystem"))
+    monkeypatch.setattr(ccpy_interop, "ensure_ccpy", lambda *a, **k: None)
+    monkeypatch.setattr(ccpy_interop, "_check_reference", lambda *a: None)
+    monkeypatch.setattr(ccpy_interop, "_scf_energy", lambda mol: 0.0)
+    n = 3
+    monkeypatch.setattr(ccpy_interop, "_openqp_ao_data", lambda mol: {
+        "nbf": n, "hcore": np.eye(n), "v_ao": np.zeros((n, n, n, n)),
+        "ca": np.eye(n), "cb": np.eye(n), "ea": np.zeros(n), "eb": np.zeros(n),
+        "na": 1, "nb": 0, "vnn": 0.0})
+
+
+@pytest.mark.parametrize("scf_type, kind", [("rohf", "System"), ("uhf", "UHFSystem")])
+def test_charge_reaches_the_ccpy_system(monkeypatch, scf_type, kind):
+    seen = {}
+    _fake_ccpy_models(monkeypatch, seen)
+    mol = types.SimpleNamespace(config={"scf": {"type": scf_type},
+                                        "input": {"charge": 1}})
+    ccpy_interop.hamiltonian_from_openqp(mol)
+    assert seen[kind]["charge"] == 1
+
+
 class _FakeDriver:
     """CCpy's rule: RHF_symmetry = (noccupied_alpha == noccupied_beta)."""
 
