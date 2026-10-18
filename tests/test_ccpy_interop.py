@@ -73,6 +73,7 @@ def test_ensure_ccpy_installs_pinned_commit(monkeypatch, tmp_path):
 
     def fake_run(cmd, **kwargs):
         seen["cmd"] = cmd
+        seen["constraints"] = open(cmd[cmd.index("--constraint") + 1]).read().split()
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(ccpy_interop.subprocess, "run", fake_run)
@@ -80,8 +81,15 @@ def test_ensure_ccpy_installs_pinned_commit(monkeypatch, tmp_path):
     assert mod.__name__ == "ccpy"
     assert calls["n"] == 3          # before the lock, under the lock, after pip
     assert seen["cmd"][:4] == [sys.executable, "-m", "pip", "install"]
-    assert seen["cmd"][4] == (f"coupled-cluster-py @ git+{ccpy_interop.CCPY_REPOSITORY}"
-                              f"@{ccpy_interop.CCPY_COMMIT}")
+    assert seen["cmd"][-1] == (f"coupled-cluster-py @ git+{ccpy_interop.CCPY_REPOSITORY}"
+                               f"@{ccpy_interop.CCPY_COMMIT}")
+    # the loaded numpy (and scipy, when installed) must stay as installed
+    from importlib import metadata
+    assert f"numpy=={metadata.version('numpy')}" in seen["constraints"]
+    try:
+        assert f"scipy=={metadata.version('scipy')}" in seen["constraints"]
+    except metadata.PackageNotFoundError:
+        pass
 
 
 def test_build_env_adds_homebrew_openblas_last(monkeypatch, tmp_path):
@@ -112,6 +120,15 @@ def test_ensure_ccpy_pip_failure_raises(monkeypatch, tmp_path):
         ccpy_interop.subprocess, "run",
         lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "meson: no fortran"))
     with pytest.raises(RuntimeError, match="no fortran"):
+        ccpy_interop.ensure_ccpy(install=True)
+
+
+def test_ensure_ccpy_rejects_numpy_1_before_pip(monkeypatch, tmp_path):
+    _hide_ccpy(monkeypatch, tmp_path)
+    monkeypatch.setattr(ccpy_interop.np, "__version__", "1.26.4")
+    monkeypatch.setattr(ccpy_interop.subprocess, "run",
+                        lambda *a, **k: pytest.fail("pip must not replace a loaded numpy"))
+    with pytest.raises(ImportError, match="numpy >= 2.0"):
         ccpy_interop.ensure_ccpy(install=True)
 
 

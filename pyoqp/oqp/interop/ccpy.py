@@ -50,6 +50,14 @@ CCPY_COMMIT = "cf72da4865e054f7a935e2df27e920cf5e335435"
 #: The pinned CCpy commit declares requires-python >= 3.10.
 CCPY_MIN_PYTHON = (3, 10)
 
+#: ... and numpy >= 2.0. OpenQP itself accepts numpy >= 1.20.
+CCPY_MIN_NUMPY = (2, 0)
+
+#: Runtime dependencies this process has already imported (numpy) or that
+#: OpenQP needs at its own version (scipy). pip must not replace them under
+#: the running interpreter, so the install pins them to what is installed.
+_PINNED_DISTRIBUTIONS = ("numpy", "scipy")
+
 #: Same agreement threshold CCpy's own PySCF interface applies.
 REFERENCE_ENERGY_TOLERANCE = 1.0e-6
 
@@ -78,6 +86,12 @@ def ensure_ccpy(install=None):
         raise ImportError(
             "CCpy needs Python >= %d.%d; this OpenQP runs on Python %d.%d."
             % (CCPY_MIN_PYTHON + tuple(sys.version_info[:2]))) from missing
+    numpy_version = tuple(int(x) for x in np.__version__.split(".")[:2])
+    if numpy_version < CCPY_MIN_NUMPY:
+        raise ImportError(
+            f"CCpy needs numpy >= {CCPY_MIN_NUMPY[0]}.{CCPY_MIN_NUMPY[1]}; this "
+            f"environment has numpy {np.__version__}, already loaded by OpenQP. "
+            "Upgrade numpy (and scipy) in a separate step, restart, and retry.") from missing
     if not install:
         raise ImportError(
             "CCpy is not installed and OPENQP_CCPY_AUTO_INSTALL=0. Install it with: "
@@ -94,16 +108,40 @@ def ensure_ccpy(install=None):
         print(f"   CCpy not found; downloading and building {CCPY_REPOSITORY}"
               f"@{CCPY_COMMIT} (GPL-3.0, external library) into {sys.prefix}. "
               "Set OPENQP_CCPY_AUTO_INSTALL=0 to disable.", flush=True)
-        proc = subprocess.run(
-            [sys.executable, "-m", "pip", "install", spec],
-            capture_output=True, text=True, env=_build_env())
+        with _pin_constraints() as constraints:
+            proc = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--constraint", constraints, spec],
+                capture_output=True, text=True, env=_build_env())
         if proc.returncode != 0:
             tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-40:])
             raise RuntimeError(
                 f"pip could not install CCpy (exit {proc.returncode}). The build "
-                f"needs git, a Fortran compiler and OpenBLAS.\n{tail}")
+                "needs git, a Fortran compiler and OpenBLAS, and must not change "
+                f"the installed {', '.join(_PINNED_DISTRIBUTIONS)}.\n{tail}")
         importlib.invalidate_caches()
         return importlib.import_module("ccpy")
+
+
+class _pin_constraints:
+    """Temporary pip constraints file pinning the installed runtime packages."""
+
+    def __enter__(self):
+        import tempfile
+        from importlib import metadata
+        lines = []
+        for name in _PINNED_DISTRIBUTIONS:
+            try:
+                lines.append(f"{name}=={metadata.version(name)}")
+            except metadata.PackageNotFoundError:
+                continue
+        fd, self.path = tempfile.mkstemp(prefix="openqp-ccpy-constraints-", suffix=".txt")
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        return self.path
+
+    def __exit__(self, *exc):
+        os.unlink(self.path)
+        return False
 
 
 #: Homebrew installs OpenBLAS keg-only, so its openblas.pc is not on the
