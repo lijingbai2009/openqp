@@ -1066,7 +1066,11 @@ contains
         else if (mrst==5) then
 
           call iatogen(bvec_mo(:,ivec), wrk1, noccb, nocca)
-          call orthogonal_transform('t', nbf, mo_a, wrk1, fmrq1(:,:,iv), wrk2)
+          ! Beta-core -> alpha-virtual density. Its reverse transform below
+          ! must use the same two spin-orbital sets; one-MO transforms make
+          ! the unrestricted response nonsymmetric even in a complete space.
+          call dgemm('n','n',nbf,nbf,nbf,1.0_dp,mo_b,nbf,wrk1,nbf,0.0_dp,wrk2,nbf)
+          call dgemm('n','t',nbf,nbf,nbf,1.0_dp,wrk2,nbf,mo_a,nbf,0.0_dp,fmrq1(:,:,iv),nbf)
 
         end if
 
@@ -1190,7 +1194,7 @@ contains
 
         else if( mrst==5 )then
 
-          call mntoia(int2_data_q%amb(:,:,iv,1), amo(:,ivec), mo_a, mo_b, noccb, nocca)
+          call mntoia(int2_data_q%amb(:,:,iv,1), amo(:,ivec), mo_b, mo_a, noccb, nocca)
 
           ! Z(I+,A-)
           call iatogen(bvec_mo(:,ivec),wrk1,noccb,nocca)
