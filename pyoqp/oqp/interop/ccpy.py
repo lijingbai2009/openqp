@@ -315,11 +315,12 @@ def driver_from_openqp(mol, nfrozen=0, ndelete=0, reference=None, **kwargs):
     ``Driver`` through this function rather than from
     :func:`hamiltonian_from_openqp` directly, or set that option yourself.
     """
-    ensure_ccpy()
-    from ccpy.drivers.driver import Driver
     ref = (reference or mol.config["scf"]["type"]).lower()
+    # hamiltonian_from_openqp validates the request before it installs CCpy,
+    # so an invalid request never downloads anything.
     system, hamiltonian = hamiltonian_from_openqp(
         mol, nfrozen=nfrozen, ndelete=ndelete, reference=reference, **kwargs)
+    from ccpy.drivers.driver import Driver
     driver = Driver(system, hamiltonian)
     if ref == "uhf":
         # CCpy turns RHF_symmetry on whenever the alpha and beta occupied

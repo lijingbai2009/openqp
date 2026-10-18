@@ -153,6 +153,18 @@ def test_install_lock_closes_file_when_locking_fails(monkeypatch, tmp_path):
     assert opened and all(fh.closed for fh in opened)
 
 
+@pytest.mark.parametrize("config, kwargs", [
+    ({"scf": {"type": "rhf"}, "input": {"functional": "bhhlyp"}}, {}),
+    ({"scf": {"type": "rks"}, "input": {}}, {}),
+    ({"scf": {"type": "rhf"}, "input": {}}, {"nfrozen": -1}),
+])
+def test_driver_rejects_invalid_requests_before_installing(monkeypatch, config, kwargs):
+    monkeypatch.setattr(ccpy_interop, "ensure_ccpy",
+                        lambda *a, **k: pytest.fail("installed before validation"))
+    with pytest.raises(ValueError):
+        ccpy_interop.driver_from_openqp(types.SimpleNamespace(config=config), **kwargs)
+
+
 def test_negative_frozen_or_deleted_orbitals_are_rejected(monkeypatch):
     monkeypatch.setattr(ccpy_interop, "ensure_ccpy",
                         lambda *a, **k: pytest.fail("checked after ensure_ccpy"))
