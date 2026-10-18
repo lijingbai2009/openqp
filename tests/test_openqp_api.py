@@ -625,6 +625,49 @@ $$$$
             self.assertEqual(config["input"]["method"], "ccsd(t)")
             self.assertEqual(config["scf"]["type"], reference)
 
+    def _fake_ccpy_interop(self, calls):
+        interop = types.ModuleType("oqp.interop")
+        interop.__path__ = []
+        fake = types.ModuleType("oqp.interop.ccpy")
+
+        def driver_from_openqp(mol, **kwargs):
+            calls.append((mol, kwargs))
+            return "driver"
+
+        fake.driver_from_openqp = driver_from_openqp
+        return {"oqp.interop": interop, "oqp.interop.ccpy": fake}
+
+    def test_ccpy_helper_runs_the_hf_reference_then_returns_the_driver(self):
+        from unittest import mock
+        openqp = load_openqp_module()
+        job = openqp.OpenQP(project="h2o_ccpy").molecule(geometry="water", basis="cc-pvdz")
+        runs, calls = [], []
+
+        def fake_run(run_type=None):
+            runs.append(job.to_input_dict()["input"]["method"])
+            job.mol = "mol"
+            return job.mol
+
+        job.run = fake_run
+        with mock.patch.dict(sys.modules, self._fake_ccpy_interop(calls)):
+            driver = job.ccpy(nfrozen=1)
+            self.assertEqual(driver, "driver")
+            job.ccpy()                                    # reuses the finished run
+        self.assertEqual(runs, ["hf"])
+        self.assertEqual(calls, [("mol", {"nfrozen": 1, "ndelete": 0}),
+                                 ("mol", {"nfrozen": 0, "ndelete": 0})])
+
+    def test_ccpy_helper_rejects_a_non_hf_job_before_running(self):
+        from unittest import mock
+        openqp = load_openqp_module()
+        for setup in (lambda j: j.ccsd(), lambda j: j.input(functional="bhhlyp")):
+            job = setup(openqp.OpenQP(project="bad").molecule(geometry="water",
+                                                              basis="sto-3g"))
+            job.run = lambda run_type=None: self.fail("ran a non-HF job")
+            with mock.patch.dict(sys.modules, self._fake_ccpy_interop([])):
+                with self.assertRaises(ValueError):
+                    job.ccpy()
+
     def test_ccsd_helper_rejects_a_dft_functional(self):
         openqp = load_openqp_module()
 

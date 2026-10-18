@@ -1205,6 +1205,31 @@ class OpenQP:
         kwargs["triples"] = True
         return self.ccsd(**kwargs)
 
+    def ccpy(self, nfrozen=0, ndelete=0, **kwargs):
+        """Return a driver of the external CCpy coupled-cluster library.
+
+        Runs the job first when it has not run yet; the job must then be a
+        Hartree-Fock (RHF, ROHF or UHF) single point, the default of
+        ``molecule(...)``. CCpy is downloaded on first use; see
+        :mod:`oqp.interop.ccpy`. Unlike the setup helpers this returns the
+        CCpy driver, not ``self``::
+
+            driver = OpenQP("h2o").molecule(geometry="water", basis="cc-pvdz").ccpy(nfrozen=1)
+            driver.run_cc(method="ccsd")
+        """
+        if self.mol is None:
+            config = self.config_str
+            method = str(config.get("input", {}).get("method", "hf")).lower()
+            functional = str(config.get("input", {}).get("functional", "") or "")
+            if method != "hf" or functional:
+                raise ValueError(
+                    "OpenQP.ccpy() needs a Hartree-Fock reference: use method='hf' "
+                    f"without a functional (got method={method!r}, "
+                    f"functional={functional!r}).")
+            self.run()
+        from oqp.interop.ccpy import driver_from_openqp
+        return driver_from_openqp(self.mol, nfrozen=nfrozen, ndelete=ndelete, **kwargs)
+
     def mp2(self, reference="rhf", runtype=None, multiplicity=None,
             basis=None, variant=None, same_spin_scale=None,
             opposite_spin_scale=None, transform=None, **scf_keywords):
