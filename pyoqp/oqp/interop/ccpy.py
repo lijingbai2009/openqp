@@ -181,6 +181,9 @@ def _lock_paths():
             os.path.join(tempfile.gettempdir(), f"openqp-ccpy-install-{tag}.lock"))
 
 
+_WINDOWS = os.name == "nt"
+
+
 class _install_lock:
     """Exclusive lock serializing the CCpy install for one environment."""
 
@@ -195,11 +198,18 @@ class _install_lock:
         else:
             raise OSError("cannot create a CCpy install lock: " + "; ".join(errors))
         try:
-            if os.name == "nt":
+            if _WINDOWS:
                 import msvcrt
                 self._fh.seek(0)
                 self._unlock = lambda: msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
-                msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+                # LK_LOCK gives up after ten one-second attempts, far shorter
+                # than a CCpy build; keep waiting until the holder finishes.
+                while True:
+                    try:
+                        msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+                        break
+                    except OSError:
+                        continue
             else:
                 import fcntl
                 self._unlock = lambda: fcntl.flock(self._fh, fcntl.LOCK_UN)

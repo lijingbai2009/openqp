@@ -182,6 +182,27 @@ def test_driver_rejects_invalid_requests_before_installing(monkeypatch, config, 
         ccpy_interop.driver_from_openqp(types.SimpleNamespace(config=config), **kwargs)
 
 
+def test_windows_install_lock_waits_past_lk_lock_timeouts(monkeypatch, tmp_path):
+    """msvcrt.LK_LOCK raises OSError after ten one-second attempts; the lock
+    must keep waiting, because a CCpy build takes much longer."""
+    attempts = []
+    fake = types.ModuleType("msvcrt")
+    fake.LK_LOCK, fake.LK_UNLCK = 1, 0
+
+    def locking(fd, mode, nbytes):
+        attempts.append(mode)
+        if mode == fake.LK_LOCK and attempts.count(fake.LK_LOCK) <= 2:
+            raise OSError("Resource deadlock avoided")
+
+    fake.locking = locking
+    monkeypatch.setitem(sys.modules, "msvcrt", fake)
+    monkeypatch.setattr(ccpy_interop, "_WINDOWS", True)
+    monkeypatch.setattr(ccpy_interop.sys, "prefix", str(tmp_path))
+    with ccpy_interop._install_lock():
+        pass
+    assert attempts == [fake.LK_LOCK] * 3 + [fake.LK_UNLCK]
+
+
 def test_negative_frozen_or_deleted_orbitals_are_rejected(monkeypatch):
     monkeypatch.setattr(ccpy_interop, "ensure_ccpy",
                         lambda *a, **k: pytest.fail("checked after ensure_ccpy"))
