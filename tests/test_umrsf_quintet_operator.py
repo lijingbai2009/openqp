@@ -71,15 +71,19 @@ def test_complete_quintet_operator(tmp_path, reference, response, functional, ex
     fa = _unpack(data['OQP::FOCK_A'], n)
     fb = _unpack(data['OQP::FOCK_B'], n)
     eri = eri_ao(runner.mol)
+    for array in (a, b, fa, fb, eri):
+        assert np.isfinite(array).all()
     expected = quintet_matrix(a, b, fa, fb, eri, nc, exchange)
-    np.testing.assert_allclose(expected, expected.T, rtol=0, atol=1e-12)
+    assert np.isfinite(expected).all()
+    np.testing.assert_allclose(expected, expected.T, rtol=0, atol=1e-12, equal_nan=False)
     values = np.asarray(data['OQP::td_energies']).ravel()
     vectors = np.asarray(data['OQP::td_bvec_mo']).reshape(dimension, dimension).T
-    np.testing.assert_allclose(vectors.T@vectors, np.eye(dimension), rtol=0, atol=1e-10)
-    np.testing.assert_allclose(values, np.linalg.eigvalsh(expected), rtol=0, atol=1e-9)
-    np.testing.assert_allclose(expected@vectors, vectors*values, rtol=0, atol=1e-9)
+    assert np.isfinite(values).all() and np.isfinite(vectors).all()
+    np.testing.assert_allclose(vectors.T@vectors, np.eye(dimension), rtol=0, atol=1e-10, equal_nan=False)
+    np.testing.assert_allclose(values, np.linalg.eigvalsh(expected), rtol=0, atol=1e-9, equal_nan=False)
+    np.testing.assert_allclose(expected@vectors, vectors*values, rtol=0, atol=1e-9, equal_nan=False)
     # Complete set of Ritz vectors recovers every signed matrix element.
-    np.testing.assert_allclose((vectors*values)@vectors.T, expected, rtol=0, atol=1e-9)
+    np.testing.assert_allclose((vectors*values)@vectors.T, expected, rtol=0, atol=1e-9, equal_nan=False)
     rng = np.random.default_rng(515)
     uc = np.linalg.qr(rng.normal(size=(nc, nc)))[0]
     uv = np.linalg.qr(rng.normal(size=(n-nc-2, n-nc-2)))[0]
@@ -88,6 +92,7 @@ def test_complete_quintet_operator(tmp_path, reference, response, functional, ex
     br[:, :nc] = br[:, :nc]@uc
     rotated = quintet_matrix(ar, br, fa, fb, eri, nc, exchange)
     transform = np.kron(uv, uc)
-    np.testing.assert_allclose(rotated, transform.T@expected@transform, rtol=0, atol=1e-12)
+    assert np.isfinite(rotated).all() and np.isfinite(transform).all()
+    np.testing.assert_allclose(rotated, transform.T@expected@transform, rtol=0, atol=1e-12, equal_nan=False)
     if reference == 'uhf':
         assert np.max(abs(a-b)) > 1e-3
