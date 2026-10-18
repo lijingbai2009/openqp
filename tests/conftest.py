@@ -25,6 +25,10 @@ The guard also covers attributes rebound on the real modules: a stub created
 with ``sys.modules.setdefault`` is the real package whenever that is already
 imported, so ``oqp.ffi = object()`` or ``numpy.int32 = ...`` written "on the
 stub" broke every later native call (a SIGSEGV in test_state_tracking).
+
+Finally, it refuses ``--forked`` where ``import oqp`` initialises MPI (mpi4py
+installed): every test would then run in a fork() of an MPI process, which
+crashes Accelerate's threaded BLAS on macOS (see pytest_configure below).
 """
 import importlib.util
 import os
@@ -245,3 +249,38 @@ def pytest_collection_modifyitems(config, items):
     for node in sorted(set(quarantine) - seen):
         warnings.warn(f"known_failures.txt lists an unknown test: {node}",
                       UserWarning)
+
+
+def _import_oqp_initialises_mpi():
+    """True when ``import oqp`` calls MPI_Init in this interpreter.
+
+    ``oqp/__init__.py`` builds ``MPIManager()``, and ``oqp.utils.mpi_utils``
+    does ``from mpi4py import MPI`` at import, which initialises MPI unless
+    mpi4py or its MPI library is missing.  Mirror that import exactly.
+    """
+    try:
+        from mpi4py import MPI  # noqa: F401
+    except (ImportError, OSError):
+        return False
+    return True
+
+
+_FORKED_MPI_REFUSAL = """\
+--forked cannot isolate tests in this environment: mpi4py is importable, so
+collecting the suite imports oqp and calls MPI_Init in the process that
+pytest-forked then fork()s once per test.  Open MPI does not support fork()
+after MPI_Init.  On macOS, MPI_Init also starts libdispatch, which a forked
+child cannot use; Accelerate runs its threaded BLAS through
+dispatch_apply, so every test that reaches a large dgemm dies with SIGSEGV
+("running the test CRASHED with signal 11").
+
+Use one of:
+  * an environment without mpi4py, as the CI pytest job does, with --forked;
+  * python -m pytest tests -n auto            (no --forked)."""
+
+
+def pytest_configure(config):
+    # Refuse here, before any worker starts or any test is forked, rather than
+    # let a few dozen tests crash with a signal that names no cause.
+    if config.getoption("forked", default=False) and _import_oqp_initialises_mpi():
+        raise pytest.UsageError(_FORKED_MPI_REFUSAL)
