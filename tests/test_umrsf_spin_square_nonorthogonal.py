@@ -105,7 +105,7 @@ def test_added_beta_virtual_overlap(theta, mult):
     assert native_s2(a, b, 2, x, mult) == pytest.approx(2, abs=1e-12)
 
 
-@pytest.mark.parametrize('nc,n', [(0, 4), (1, 5), (2, 6), (3, 7)])
+@pytest.mark.parametrize('nc,n', [(0, 2), (1, 3), (2, 4), (0, 4), (1, 5), (2, 6), (3, 7)])
 @pytest.mark.parametrize('mult', [1, 3])
 def test_nonorthogonal_classes_and_cross_terms(nc, n, mult):
     rng = np.random.default_rng(515+nc)
@@ -155,7 +155,7 @@ def test_nonidentity_ao_metric(mult):
                      nc, x, mult, metric) == pytest.approx(ref, abs=1e-12)
 
 
-@pytest.mark.parametrize('case', ['zero', 'null', 'near_null', 'spin'])
+@pytest.mark.parametrize('case', ['zero', 'nonfinite', 'null', 'near_null', 'spin'])
 def test_invalid_paired_state_fails(case):
     assert oqp is not None, f"compiled oqp unavailable: {OQP_IMPORT_ERROR!r}"
     code = '''
@@ -164,6 +164,7 @@ import numpy as np
 n=3; a=np.eye(n); b=a.copy(); x=np.zeros(6); mult=3
 x[0]=1
 if CASE == 'zero': x[:]=0
+elif CASE == 'nonfinite': x[0]=np.nan
 elif CASE in ('null','near_null'):
     b[:,[0,1]]=b[:,[1,0]]
     if CASE == 'near_null': x[4]=1e-9
@@ -210,3 +211,25 @@ def test_umrsf_printed_states_against_common_basis_oracle(tmp_path, molecule, nc
     native = [native_s2(a, b, nc, x, mult, metric) for x in vectors]
     np.testing.assert_allclose(native, exact, rtol=0, atol=1e-10)
     np.testing.assert_allclose(printed, exact, rtol=0, atol=PRINT_ATOL)
+
+
+@pytest.mark.parametrize('rank', [0, 1, 2])
+@pytest.mark.parametrize('mult', [1, 3])
+def test_occupied_and_core_rotations_change_svd_gauge(rank, mult):
+    rng = np.random.default_rng(902+rank)
+    n, nc, na = 6, 2, 4
+    a = np.eye(n); b = np.eye(n)
+    for j in range(nc-rank):
+        b[:, [j, 4+j]] = b[:, [4+j, j]]
+    # Only virtual particles: arbitrary occupied-alpha rotations need no OO fold.
+    amplitudes = np.zeros((na, n-nc)); amplitudes[:, 2:] = rng.normal(size=(na, 2))
+    x = amplitudes.ravel(order='F')
+    ref = spin_square(nonorthogonal_state(a, b, nc, x, mult), n)
+    occupied_rotation = np.linalg.qr(rng.normal(size=(na, na)))[0]
+    core_rotation = np.linalg.qr(rng.normal(size=(nc, nc)))[0]
+    a[:, :na] = a[:, :na]@occupied_rotation
+    b[:, :nc] = b[:, :nc]@core_rotation
+    x = (occupied_rotation.T@amplitudes).ravel(order='F')
+    rotated_ref = spin_square(nonorthogonal_state(a, b, nc, x, mult), n)
+    assert rotated_ref == pytest.approx(ref, abs=1e-12)
+    assert native_s2(a, b, nc, x, mult) == pytest.approx(ref, abs=1e-12)
