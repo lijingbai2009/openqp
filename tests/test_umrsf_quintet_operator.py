@@ -76,8 +76,8 @@ def test_complete_quintet_operator(tmp_path, reference, response, functional, ex
     expected = quintet_matrix(a, b, fa, fb, eri, nc, exchange)
     assert np.isfinite(expected).all()
     np.testing.assert_allclose(expected, expected.T, rtol=0, atol=1e-12, equal_nan=False)
-    values = np.asarray(data['OQP::td_energies']).ravel()
-    vectors = np.asarray(data['OQP::td_bvec_mo']).reshape(dimension, dimension).T
+    values = np.array(data['OQP::td_energies'], copy=True).ravel()
+    vectors = np.array(data['OQP::td_bvec_mo'], copy=True).reshape(dimension, dimension).T
     assert np.isfinite(values).all() and np.isfinite(vectors).all()
     np.testing.assert_allclose(vectors.T@vectors, np.eye(dimension), rtol=0, atol=1e-10, equal_nan=False)
     np.testing.assert_allclose(values, np.linalg.eigvalsh(expected), rtol=0, atol=1e-9, equal_nan=False)
@@ -88,11 +88,28 @@ def test_complete_quintet_operator(tmp_path, reference, response, functional, ex
     uc = np.linalg.qr(rng.normal(size=(nc, nc)))[0]
     uv = np.linalg.qr(rng.normal(size=(n-nc-2, n-nc-2)))[0]
     ar = a.copy(); br = b.copy()
-    ar[:, nc+2:] = ar[:, nc+2:]@uv
-    br[:, :nc] = br[:, :nc]@uc
+    for orbitals in (ar, br):
+        orbitals[:, :nc] = orbitals[:, :nc]@uc
+        orbitals[:, nc+2:] = orbitals[:, nc+2:]@uv
     rotated = quintet_matrix(ar, br, fa, fb, eri, nc, exchange)
     transform = np.kron(uv, uc)
     assert np.isfinite(rotated).all() and np.isfinite(transform).all()
     np.testing.assert_allclose(rotated, transform.T@expected@transform, rtol=0, atol=1e-12, equal_nan=False)
+    # Exercise the production driver in the rotated basis, not only the oracle.
+    # Both reference densities stay unchanged, so the AO Fock and ERIs remain valid.
+    data['OQP::VEC_MO_A'][:] = ar.T
+    data['OQP::VEC_MO_B'][:] = br.T
+    getattr(oqp, f'tdhf_{response}_energy')(runner.mol)
+    assert runner.mol.mol_energy.Davidson_converged
+    rotated_values = np.array(data['OQP::td_energies'], copy=True).ravel()
+    rotated_vectors = np.array(data['OQP::td_bvec_mo'], copy=True).reshape(dimension, dimension).T
+    assert np.isfinite(rotated_values).all() and np.isfinite(rotated_vectors).all()
+    np.testing.assert_allclose(rotated_vectors.T@rotated_vectors, np.eye(dimension),
+                               rtol=0, atol=1e-10, equal_nan=False)
+    np.testing.assert_allclose(rotated_values, values, rtol=0, atol=1e-9, equal_nan=False)
+    np.testing.assert_allclose(rotated@rotated_vectors, rotated_vectors*rotated_values,
+                               rtol=0, atol=1e-9, equal_nan=False)
+    np.testing.assert_allclose((rotated_vectors*rotated_values)@rotated_vectors.T, rotated,
+                               rtol=0, atol=1e-9, equal_nan=False)
     if reference == 'uhf':
         assert np.max(abs(a-b)) > 1e-3
