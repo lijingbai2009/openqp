@@ -17,7 +17,10 @@ ordering and normalization are those of the SCF that produced the orbitals:
 
 CCpy works in physicist order ``<pq|rs> = (pr|qs)``, hence
 ``transpose(0, 2, 1, 3)``. Point-group symmetry is not passed on (C1). The
-two-electron integrals are held in core (``nbf**4``), as in ``oqp.quantum``.
+two-electron integrals are held in core, as in ``oqp.quantum``: the AO tensor
+and the MO tensors each take ``8 * nbf**4`` bytes (UHF keeps three spin
+blocks), so the peak is several times that: an estimated 2-3 GB at
+``nbf = 100`` (from the formula, not measured).
 
 Usage::
 
@@ -44,6 +47,9 @@ CCPY_REPOSITORY = "https://github.com/piecuch-group/ccpy"
 #: Commit validated against OpenQP RHF/UHF/ROHF references (2026-10-17).
 CCPY_COMMIT = "cf72da4865e054f7a935e2df27e920cf5e335435"
 
+#: The pinned CCpy commit declares requires-python >= 3.10.
+CCPY_MIN_PYTHON = (3, 10)
+
 #: Same agreement threshold CCpy's own PySCF interface applies.
 REFERENCE_ENERGY_TOLERANCE = 1.0e-6
 
@@ -68,6 +74,10 @@ def ensure_ccpy(install=None):
     if install is None:
         install = _auto_install_enabled()
     spec = f"coupled-cluster-py @ git+{CCPY_REPOSITORY}@{CCPY_COMMIT}"
+    if tuple(sys.version_info[:2]) < CCPY_MIN_PYTHON:
+        raise ImportError(
+            "CCpy needs Python >= %d.%d; this OpenQP runs on Python %d.%d."
+            % (CCPY_MIN_PYTHON + tuple(sys.version_info[:2]))) from missing
     if not install:
         raise ImportError(
             "CCpy is not installed and OPENQP_CCPY_AUTO_INSTALL=0. Install it with: "
@@ -81,8 +91,9 @@ def ensure_ccpy(install=None):
             return importlib.import_module("ccpy")
         except ImportError:
             pass
-        print(f"   CCpy not found; installing {CCPY_REPOSITORY}@{CCPY_COMMIT[:12]} "
-              "(GPL-3.0, external library)", flush=True)
+        print(f"   CCpy not found; downloading and building {CCPY_REPOSITORY}"
+              f"@{CCPY_COMMIT} (GPL-3.0, external library) into {sys.prefix}. "
+              "Set OPENQP_CCPY_AUTO_INSTALL=0 to disable.", flush=True)
         proc = subprocess.run(
             [sys.executable, "-m", "pip", "install", spec],
             capture_output=True, text=True, env=_build_env())
@@ -119,21 +130,45 @@ def _build_env():
     return env
 
 
+def _lock_paths():
+    """Lock file in the environment, else in the temp directory.
+
+    The temp-directory name is derived from sys.prefix, so processes that
+    install into the same environment still share one lock.
+    """
+    import hashlib
+    import tempfile
+    tag = hashlib.sha256(os.path.realpath(sys.prefix).encode()).hexdigest()[:16]
+    return (os.path.join(sys.prefix, ".openqp-ccpy-install.lock"),
+            os.path.join(tempfile.gettempdir(), f"openqp-ccpy-install-{tag}.lock"))
+
+
 class _install_lock:
-    """Exclusive lock on <sys.prefix>/.openqp-ccpy-install.lock."""
+    """Exclusive lock serializing the CCpy install for one environment."""
 
     def __enter__(self):
-        path = os.path.join(sys.prefix, ".openqp-ccpy-install.lock")
-        self._fh = open(path, "a+")
-        if os.name == "nt":
-            import msvcrt
-            self._fh.seek(0)
-            self._unlock = lambda: msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
-            msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+        errors = []
+        for path in _lock_paths():
+            try:
+                self._fh = open(path, "a+")
+                break
+            except OSError as exc:
+                errors.append(f"{path}: {exc}")
         else:
-            import fcntl
-            self._unlock = lambda: fcntl.flock(self._fh, fcntl.LOCK_UN)
-            fcntl.flock(self._fh, fcntl.LOCK_EX)
+            raise OSError("cannot create a CCpy install lock: " + "; ".join(errors))
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self._fh.seek(0)
+                self._unlock = lambda: msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                self._unlock = lambda: fcntl.flock(self._fh, fcntl.LOCK_UN)
+                fcntl.flock(self._fh, fcntl.LOCK_EX)
+        except BaseException:
+            self._fh.close()
+            raise
         return self
 
     def __exit__(self, *exc):
@@ -222,6 +257,8 @@ def hamiltonian_from_openqp(mol, nfrozen=0, ndelete=0, reference=None,
         raise ValueError(
             "CCpy needs Hartree-Fock orbitals; the OpenQP SCF used functional="
             f"{mol.config['input']['functional']!r}.")
+    if nfrozen < 0 or ndelete < 0:
+        raise ValueError(f"nfrozen={nfrozen} and ndelete={ndelete} must be >= 0.")
     ensure_ccpy()
     from ccpy.energy.hf_energy import calc_hf_energy, calc_hf_frozen_core_energy
     from ccpy.interfaces.fcidump_tools import build_rohf_fock
@@ -230,6 +267,12 @@ def hamiltonian_from_openqp(mol, nfrozen=0, ndelete=0, reference=None,
 
     d = _openqp_ao_data(mol)
     na, nb, norb = d["na"], d["nb"], d["nbf"]
+    if nfrozen > nb:
+        raise ValueError(f"nfrozen={nfrozen} exceeds the {nb} doubly occupied "
+                         "(beta) orbitals.")
+    if ndelete > norb - na:
+        raise ValueError(f"ndelete={ndelete} exceeds the {norb - na} virtual "
+                         "(alpha) orbitals.")
     nelec, mult = na + nb, na - nb + 1
     e_scf = _scf_energy(mol)
 
@@ -266,9 +309,22 @@ def hamiltonian_from_openqp(mol, nfrozen=0, ndelete=0, reference=None,
 
 
 def driver_from_openqp(mol, nfrozen=0, ndelete=0, reference=None, **kwargs):
-    """Return a ``ccpy.drivers.driver.Driver`` for a converged OpenQP SCF."""
+    """Return a ``ccpy.drivers.driver.Driver`` for a converged OpenQP SCF.
+
+    For a UHF reference the driver runs with ``RHF_symmetry=False``. Build the
+    ``Driver`` through this function rather than from
+    :func:`hamiltonian_from_openqp` directly, or set that option yourself.
+    """
     ensure_ccpy()
     from ccpy.drivers.driver import Driver
+    ref = (reference or mol.config["scf"]["type"]).lower()
     system, hamiltonian = hamiltonian_from_openqp(
         mol, nfrozen=nfrozen, ndelete=ndelete, reference=reference, **kwargs)
-    return Driver(system, hamiltonian)
+    driver = Driver(system, hamiltonian)
+    if ref == "uhf":
+        # CCpy turns RHF_symmetry on whenever the alpha and beta occupied
+        # counts are equal and then copies alpha amplitudes into beta ones.
+        # A UHF singlet (broken symmetry) has different alpha and beta
+        # orbitals, so that shortcut would be wrong.
+        driver.options["RHF_symmetry"] = False
+    return driver

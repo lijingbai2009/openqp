@@ -43,6 +43,8 @@ def _hide_ccpy(monkeypatch, tmp_path, failures=2):
     real = ccpy_interop.importlib.import_module
     calls = {"n": 0}
     monkeypatch.setattr(ccpy_interop.sys, "prefix", str(tmp_path))
+    # CCpy's floor; the version gate has its own test below
+    monkeypatch.setattr(ccpy_interop.sys, "version_info", (3, 11, 0, "final", 0))
 
     def fake(name, *args, **kwargs):
         if name == "ccpy":
@@ -113,6 +115,79 @@ def test_ensure_ccpy_pip_failure_raises(monkeypatch, tmp_path):
         ccpy_interop.ensure_ccpy(install=True)
 
 
+def test_ensure_ccpy_rejects_old_python_before_pip(monkeypatch, tmp_path):
+    _hide_ccpy(monkeypatch, tmp_path)
+    monkeypatch.setattr(ccpy_interop.sys, "version_info", (3, 9, 18, "final", 0))
+    monkeypatch.setattr(ccpy_interop.subprocess, "run",
+                        lambda *a, **k: pytest.fail("pip must not run on Python 3.9"))
+    with pytest.raises(ImportError, match="Python >= 3.10"):
+        ccpy_interop.ensure_ccpy(install=True)
+
+
+def test_install_lock_falls_back_when_prefix_is_not_writable(monkeypatch, tmp_path):
+    monkeypatch.setattr(ccpy_interop.sys, "prefix", str(tmp_path / "missing" / "env"))
+    import tempfile
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    with ccpy_interop._install_lock():
+        locks = list(tmp_path.glob("openqp-ccpy-install-*.lock"))
+    assert len(locks) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises the fcntl branch")
+def test_install_lock_closes_file_when_locking_fails(monkeypatch, tmp_path):
+    import fcntl
+    monkeypatch.setattr(ccpy_interop.sys, "prefix", str(tmp_path))
+    opened = []
+    real_open = open
+
+    def tracking_open(*a, **k):
+        fh = real_open(*a, **k)
+        opened.append(fh)
+        return fh
+
+    monkeypatch.setattr(ccpy_interop, "open", tracking_open, raising=False)
+    monkeypatch.setattr(fcntl, "flock", lambda *a: (_ for _ in ()).throw(OSError("busy")))
+    with pytest.raises(OSError, match="busy"):
+        with ccpy_interop._install_lock():
+            pass
+    assert opened and all(fh.closed for fh in opened)
+
+
+def test_negative_frozen_or_deleted_orbitals_are_rejected(monkeypatch):
+    monkeypatch.setattr(ccpy_interop, "ensure_ccpy",
+                        lambda *a, **k: pytest.fail("checked after ensure_ccpy"))
+    mol = types.SimpleNamespace(config={"scf": {"type": "rhf"}, "input": {}})
+    with pytest.raises(ValueError, match="must be >= 0"):
+        ccpy_interop.hamiltonian_from_openqp(mol, nfrozen=-1)
+
+
+class _FakeDriver:
+    """CCpy's rule: RHF_symmetry = (noccupied_alpha == noccupied_beta)."""
+
+    def __init__(self, system, hamiltonian):
+        self.system = system
+        self.options = {"RHF_symmetry": system.noccupied_alpha == system.noccupied_beta}
+
+
+def _fake_driver_module(monkeypatch):
+    for name in ("ccpy", "ccpy.drivers"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    mod = types.ModuleType("ccpy.drivers.driver")
+    mod.Driver = _FakeDriver
+    monkeypatch.setitem(sys.modules, "ccpy.drivers.driver", mod)
+    monkeypatch.setattr(ccpy_interop, "ensure_ccpy", lambda *a, **k: None)
+    system = types.SimpleNamespace(noccupied_alpha=4, noccupied_beta=4)
+    monkeypatch.setattr(ccpy_interop, "hamiltonian_from_openqp",
+                        lambda mol, **k: (system, object()))
+
+
+@pytest.mark.parametrize("scf_type, expected", [("uhf", False), ("rhf", True)])
+def test_uhf_singlet_driver_is_unrestricted(monkeypatch, scf_type, expected):
+    _fake_driver_module(monkeypatch)
+    mol = types.SimpleNamespace(config={"scf": {"type": scf_type}, "input": {}})
+    assert ccpy_interop.driver_from_openqp(mol).options["RHF_symmetry"] is expected
+
+
 # --------------------------------------------------------------------------
 # UHF reference energy from AO integrals
 # --------------------------------------------------------------------------
@@ -166,40 +241,47 @@ native = pytest.mark.skipif(not _have_native_oqp(),
 
 _RUNNER = r"""
 import json, sys
-case = json.loads(sys.argv[1])
-atoms = "\n".join("   %d %.10f %.10f %.10f" % tuple(a) for a in case["atoms"])
-open("case.inp", "w").write(
-    "[input]\nsystem=\n%s\ncharge=0\nruntype=energy\nbasis=%s\nmethod=hf\n\n"
-    "[guess]\ntype=huckel\n\n[scf]\ntype=%s\nmultiplicity=%d\nconv=1.0e-11\nmaxit=200\n"
-    % (atoms, case["basis"], case["scf_type"], case["multiplicity"]))
 from oqp.pyoqp import Runner
-runner = Runner(project="case", input_file="case.inp", log="case.log")
-runner.run()
 from oqp.interop.ccpy import driver_from_openqp
-out = {}
-def driver():
+
+def run(case, k):
+    atoms = "\n".join("   %d %.10f %.10f %.10f" % tuple(a) for a in case["atoms"])
+    ispher = "ispher=true\n" if case.get("ispher") else ""
+    inp = "case%d.inp" % k
+    open(inp, "w").write(
+        "[input]\nsystem=\n%s\ncharge=0\nruntype=energy\nbasis=%s\nmethod=hf\n%s\n"
+        "[guess]\ntype=huckel\n\n[scf]\ntype=%s\nmultiplicity=%d\nconv=1.0e-11\nmaxit=200\n"
+        % (atoms, case["basis"], ispher, case["scf_type"], case["multiplicity"]))
+    runner = Runner(project="case%d" % k, input_file=inp, log="case%d.log" % k)
+    runner.run()
     drv = driver_from_openqp(runner.mol, nfrozen=case["nfrozen"])
     drv.options["energy_convergence"] = 1.0e-10
     drv.options["amp_convergence"] = 1.0e-8
     drv.options["maximum_iterations"] = 200
-    return drv
-drv = driver()
-drv.run_cc(method="ccsd")
-out["e_ref"] = drv.system.reference_energy
-out["e_ccsd"] = drv.system.reference_energy + drv.correlation_energy
-if "crcc23" in case["tasks"]:
-    drv.run_hbar(method="ccsd")
-    drv.run_leftcc(method="left_ccsd")
-    drv.run_ccp3(method="crcc23")
-    out["e_crcc23_d"] = drv.system.reference_energy + drv.correlation_energy + drv.deltap3[0]["D"]
-if "sfeomccsd" in case["tasks"]:
-    drv.run_hbar(method="ccsd")
-    n = case["nroot"]
-    drv.run_guess(method="sfcis", multiplicity=1, roots_per_irrep={"A": n},
-                  nact_occupied=0, nact_unoccupied=0, use_symmetry=False)
-    drv.run_sfeomcc(method="sfeomccsd", state_index=list(range(n)))
-    out["omega_singlets"] = [float(drv.vertical_excitation_energy[i]) for i in range(n)]
-print("CCPY_RESULT " + json.dumps(out))
+    return case_tasks(case, drv)
+
+def case_tasks(case, drv):
+    out = {}
+    drv.run_cc(method="ccsd")
+    out["e_ref"] = drv.system.reference_energy
+    out["e_ccsd"] = drv.system.reference_energy + drv.correlation_energy
+    if "crcc23" in case["tasks"]:
+        drv.run_hbar(method="ccsd")
+        drv.run_leftcc(method="left_ccsd")
+        drv.run_ccp3(method="crcc23")
+        out["e_crcc23_d"] = (drv.system.reference_energy + drv.correlation_energy
+                             + drv.deltap3[0]["D"])
+    if "sfeomccsd" in case["tasks"]:
+        drv.run_hbar(method="ccsd")
+        n = case["nroot"]
+        drv.run_guess(method="sfcis", multiplicity=1, roots_per_irrep={"A": n},
+                      nact_occupied=0, nact_unoccupied=0, use_symmetry=False)
+        drv.run_sfeomcc(method="sfeomccsd", state_index=list(range(n)))
+        out["omega_singlets"] = [float(drv.vertical_excitation_energy[i]) for i in range(n)]
+    return out
+
+results = [run(case, k) for k, case in enumerate(json.loads(sys.argv[1]))]
+print("CCPY_RESULT " + json.dumps(results))
 """
 
 
@@ -207,16 +289,17 @@ def _cases():
     return json.loads(DATA.read_text())["cases"]
 
 
-@native
-@pytest.mark.parametrize("case", _cases(), ids=lambda c: c["name"])
-def test_openqp_orbitals_reproduce_pyscf_ccpy(case, tmp_path):
-    env = dict(os.environ, OMP_NUM_THREADS=str(case.get("threads", 2)))
-    proc = subprocess.run([sys.executable, "-c", _RUNNER, json.dumps(case)],
+def _run_cases(cases, tmp_path, threads):
+    env = dict(os.environ, OMP_NUM_THREADS=str(threads))
+    proc = subprocess.run([sys.executable, "-c", _RUNNER, json.dumps(cases)],
                           cwd=tmp_path, capture_output=True, text=True,
                           timeout=3600, env=env)
     lines = [l for l in proc.stdout.splitlines() if l.startswith("CCPY_RESULT ")]
     assert proc.returncode == 0 and lines, proc.stdout[-4000:] + proc.stderr[-4000:]
-    got = json.loads(lines[-1].split(" ", 1)[1])
+    return json.loads(lines[-1].split(" ", 1)[1])
+
+
+def _check(got, case):
     tol = json.loads(DATA.read_text())["tolerance"]
     ref = case["reference"]
     assert got["e_ref"] == pytest.approx(ref["e_ref"], abs=tol)
@@ -225,6 +308,23 @@ def test_openqp_orbitals_reproduce_pyscf_ccpy(case, tmp_path):
         assert got["e_crcc23_d"] == pytest.approx(ref["e_crcc23_d"], abs=tol)
     if "omega_singlets" in ref:
         assert got["omega_singlets"] == pytest.approx(ref["omega_singlets"], abs=tol)
+
+
+@native
+@pytest.mark.parametrize("case", _cases(), ids=lambda c: c["name"])
+def test_openqp_orbitals_reproduce_pyscf_ccpy(case, tmp_path):
+    [got] = _run_cases([case], tmp_path, case.get("threads", 2))
+    _check(got, case)
+
+
+@native
+def test_repeated_calls_with_changing_basis_size(tmp_path):
+    """Several molecules in one process, nbf up, down and up again."""
+    by_name = {c["name"]: c for c in _cases()}
+    seq = [by_name[n] for n in ("h2o_rhf_ccpvdz_spherical", "ch2_uhf_631gs",
+                                "h2o_rhf_631gs_fc1", "h2o_rhf_ccpvdz_spherical")]
+    for got, case in zip(_run_cases(seq, tmp_path, 2), seq):
+        _check(got, case)
 
 
 def test_dft_orbitals_are_rejected_before_ccpy_is_needed(monkeypatch):
