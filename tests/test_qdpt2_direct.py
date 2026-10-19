@@ -45,8 +45,11 @@ def _run(tmp_path, project, *, system, basis, cas, pt2, ci=None, method="mcqdpt2
             "input": {"system": system, "charge": "0", "basis": basis,
                       "method": method, "runtype": "energy"},
             "guess": {"type": "hcore"},
+            # Each engine prepares its own RHF orbitals.  The default 1e-6
+            # residual permits reference differences larger than the post-HF
+            # comparison below, even when the printed SCF energies agree.
             "scf": {"type": "rhf", "multiplicity": "1", "maxit": "60",
-                    "forced_attempt": "3", "save_molden": "False"},
+                    "conv": "1.0e-12", "forced_attempt": "3", "save_molden": "False"},
             "properties": {"scf_prop": ""},
             "cas": cas,
             "ci": ci_block,
@@ -101,7 +104,7 @@ def test_direct_engine_matches_dense_h4(tmp_path, method, nroot, extra):
     e_dense, e_direct = _both_engines(
         tmp_path, f"eq_{method}_{nroot}", method, ci, pt2,
         system=_H4, basis="sto-3g", cas=_CAS22)
-    np.testing.assert_allclose(e_direct, e_dense, atol=1.0e-10)
+    np.testing.assert_allclose(e_direct, e_dense, atol=1.0e-10, rtol=0.0)
 
 
 def test_direct_engine_matches_dense_frozen_core_lih(tmp_path):
@@ -113,7 +116,7 @@ def test_direct_engine_matches_dense_frozen_core_lih(tmp_path):
         system=_LIH, basis="sto-3g",
         cas={"active_electrons": "2", "active_orbitals": "2", "frozen_core": "1",
              "max_det": "2000"})
-    np.testing.assert_allclose(e_direct, e_dense, atol=1.0e-10)
+    np.testing.assert_allclose(e_direct, e_dense, atol=1.0e-10, rtol=0.0)
 
 
 def test_direct_engine_full_active_zero_correction(tmp_path):
