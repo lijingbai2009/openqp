@@ -89,11 +89,8 @@ contains
     nsh = basis%nshell
     nmatrix = ubound(this%d3, 2) ! 7 ! spin pair copuling A': bo2v, bo1v, bco1, bco2, o21v, co12; A: ball
 
-    compact=.false.
-    select type(this)
-    type is(int2_mrsf_data_t)
-      compact=this%general_only
-    end select
+    ! Both MRSF and UMRSF energy caches request the single dynamic image.
+    compact=this%general_only
     call ensure_mrsf_fp32()
     if(compact.and.g_mrsf_fp32/=0) &
       call show_message('Compact MRSF exchange requires FP64 accumulation',with_abort)
@@ -407,11 +404,14 @@ contains
     type(int2_storage_t), intent(inout) :: buf
     integer :: i, j, k, l, n, v, c
     real(kind=dp) :: val, xval, cval
-    integer :: mythread
+    integer :: mythread, last_pair, last_mixed, general_channel
 
     mythread = buf%thread_id
 
     if (.not.this%tamm_dancoff) return
+    last_pair=merge(0,8,this%general_only)
+    last_mixed=merge(8,10,this%general_only)
+    general_channel=merge(1,11,this%general_only)
 
     associate ( f3 => this%f3(:,:,:,:,mythread), &
                 d3 => this%d3, &
@@ -436,7 +436,7 @@ contains
           ! Coulomb (columns 1:8): the 8 permutational contributions collapse
           ! to 4 distinct Fock targets, each reading one symmetric ds slab:
           ! f(ij)+=c[d(kl)+d(lk)], f(ji) likewise, f(kl)+=c[d(ij)+d(ji)], f(lk) likewise.
-          do c = 1, 8
+          do c = 1, last_pair
             do v = 1, nf
               f3(v,c,i,j) = f3(v,c,i,j) + cval*ds(v,c,k,l)
               f3(v,c,j,i) = f3(v,c,j,i) + cval*ds(v,c,k,l)
@@ -446,7 +446,7 @@ contains
           end do
 
           ! Exchange (columns 1:8 and the general column 11).
-          do c = 1, 8
+          do c = 1, last_pair
             do v = 1, nf
               f3(v,c,i,k) = f3(v,c,i,k) - xval*d3(v,c,j,l)
               f3(v,c,k,i) = f3(v,c,k,i) - xval*d3(v,c,l,j)
@@ -459,19 +459,19 @@ contains
             end do
           end do
           do v = 1, nf
-            f3(v,11,i,k) = f3(v,11,i,k) - xval*d3(v,11,j,l)
-            f3(v,11,k,i) = f3(v,11,k,i) - xval*d3(v,11,l,j)
-            f3(v,11,i,l) = f3(v,11,i,l) - xval*d3(v,11,j,k)
-            f3(v,11,l,i) = f3(v,11,l,i) - xval*d3(v,11,k,j)
-            f3(v,11,j,k) = f3(v,11,j,k) - xval*d3(v,11,i,l)
-            f3(v,11,k,j) = f3(v,11,k,j) - xval*d3(v,11,l,i)
-            f3(v,11,j,l) = f3(v,11,j,l) - xval*d3(v,11,i,k)
-            f3(v,11,l,j) = f3(v,11,l,j) - xval*d3(v,11,k,i)
+            f3(v,general_channel,i,k) = f3(v,general_channel,i,k) - xval*d3(v,11,j,l)
+            f3(v,general_channel,k,i) = f3(v,general_channel,k,i) - xval*d3(v,11,l,j)
+            f3(v,general_channel,i,l) = f3(v,general_channel,i,l) - xval*d3(v,11,j,k)
+            f3(v,general_channel,l,i) = f3(v,general_channel,l,i) - xval*d3(v,11,k,j)
+            f3(v,general_channel,j,k) = f3(v,general_channel,j,k) - xval*d3(v,11,i,l)
+            f3(v,general_channel,k,j) = f3(v,general_channel,k,j) - xval*d3(v,11,l,i)
+            f3(v,general_channel,j,l) = f3(v,general_channel,j,l) - xval*d3(v,11,i,k)
+            f3(v,general_channel,l,j) = f3(v,general_channel,l,j) - xval*d3(v,11,k,i)
           end do
 
           ! Mixed alpha/beta spin-pair channels use the GAMESS-compatible
           ! exchange permutation for UMRSF open-shell pair densities.
-          do c = 9, 10
+          do c = 9, last_mixed
             do v = 1, nf
               f3(v,c,i,l) = f3(v,c,i,l) - xval*d3(v,c,k,j)
               f3(v,c,l,i) = f3(v,c,l,i) - xval*d3(v,c,j,k)
@@ -492,14 +492,14 @@ contains
           i = buf%ids(1,n); j = buf%ids(2,n); k = buf%ids(3,n); l = buf%ids(4,n)
           xval = buf%ints(n) * this%scale_exchange
           do v = 1, nf
-            f3(v,11,i,k) = f3(v,11,i,k) - xval*d3(v,11,j,l)
-            f3(v,11,k,i) = f3(v,11,k,i) - xval*d3(v,11,l,j)
-            f3(v,11,i,l) = f3(v,11,i,l) - xval*d3(v,11,j,k)
-            f3(v,11,l,i) = f3(v,11,l,i) - xval*d3(v,11,k,j)
-            f3(v,11,j,k) = f3(v,11,j,k) - xval*d3(v,11,i,l)
-            f3(v,11,k,j) = f3(v,11,k,j) - xval*d3(v,11,l,i)
-            f3(v,11,j,l) = f3(v,11,j,l) - xval*d3(v,11,i,k)
-            f3(v,11,l,j) = f3(v,11,l,j) - xval*d3(v,11,k,i)
+            f3(v,general_channel,i,k) = f3(v,general_channel,i,k) - xval*d3(v,11,j,l)
+            f3(v,general_channel,k,i) = f3(v,general_channel,k,i) - xval*d3(v,11,l,j)
+            f3(v,general_channel,i,l) = f3(v,general_channel,i,l) - xval*d3(v,11,j,k)
+            f3(v,general_channel,l,i) = f3(v,general_channel,l,i) - xval*d3(v,11,k,j)
+            f3(v,general_channel,j,k) = f3(v,general_channel,j,k) - xval*d3(v,11,i,l)
+            f3(v,general_channel,k,j) = f3(v,general_channel,k,j) - xval*d3(v,11,l,i)
+            f3(v,general_channel,j,l) = f3(v,general_channel,j,l) - xval*d3(v,11,i,k)
+            f3(v,general_channel,l,j) = f3(v,general_channel,l,j) - xval*d3(v,11,k,i)
           end do
         end do
       end if
@@ -3903,110 +3903,224 @@ contains
 
 !###############################################################################
 
-!> Compute the <S^2> expectation value of a UMRSF-TDDFT response state
+!> Compute the <S^2> expectation value of a ROHF MRSF-TDDFT response state
 !>
-!> UMRSF analogue of the MRSF spin-square evaluation: accumulates <S^2>
-!> for state js from the response amplitudes bvec_mo and the diagonal
-!> alpha/beta MO overlaps, for singlet (mrsfs) or triplet (mrsft) targets.
+!> All MRSF configurations except core->virtual (C->V) are spin adapted: the
+!> E+ - E- (singlet) and E+ + E- (triplet) combinations of the O->O, C->O and
+!> O->V spin flips are exact S = 0 and S = 1 functions.  A C->V pair has four
+!> open shells (C, O1, O2, V); its triplet combination is a pure triplet, while
+!> its singlet combination is sqrt(2/3) S=0 + sqrt(1/3) S=2, i.e. <S^2> = 2.
+!> S^2 does not couple different spatial occupations, so
 !>
-  subroutine umrsfssqu(ss, mo_a, mo_b, smat, wrk1, wrk2, nbf, nbf2, xvec_dim, js, &
-                       norb, bvec_mo, nocca, noccb, mrsfs, mrsft)
+!>   singlet: <S^2> = 2 w_CV,   w_CV = sum_{i<=noccb, j>2} X(i,j)**2 / |X|**2
+!>   triplet: <S^2> = 2
+!>
+!> (Dier, Dittmer, Rikus, Dreuw, Neugebauer, ChemRxiv 2026,
+!> doi:10.26434/chemrxiv.15010307, Eqs. 24-26).  bvec_mo uses the packed
+!> layout X(i,j), i = alpha-occupied, j = beta-virtual counted from noccb+1.
+!>
+  pure subroutine mrsfssq(ss, bvec_mo, nocca, noccb, nbf, mrsfs)
 
-    use mathlib, only: unpack_f90
     use precision, only: dp
 
     implicit none
 
-    logical, intent(in) :: mrsfs, mrsft
-    integer :: i, j, js, nocca, noccb, nbf, nbf2, xvec_dim, norb
-    real(kind=dp), intent(in),    dimension(:,:) :: mo_a, mo_b
-    real(kind=dp), intent(in),    dimension(:)   :: smat
-    real(kind=dp), intent(inout), dimension(:,:) :: wrk1
-    real(kind=dp), intent(inout), dimension(:)   :: wrk2
-    real(kind=dp), intent(in),    dimension(nocca, norb-noccb, *) :: bvec_mo
     real(kind=dp), intent(out) :: ss
-    real(kind=dp), parameter :: half = 0.5d+00
-    real(kind=dp), parameter :: tol = 1.0d-12
+    real(kind=dp), intent(in) :: bvec_mo(:)
+    integer, intent(in) :: nocca, noccb, nbf
+    logical, intent(in) :: mrsfs
 
-    real(kind=dp) :: a, b, c, dum, f
+    real(kind=dp) :: total, cv
+    integer :: j
 
-    call unpack_f90(smat, wrk1, 'u')
-
-    ! Precalculation of diagonal alpha/beta MO overlaps
-    a = 0
-    b = 1
-    c = 0
-    do i = 1, nocca
-      dum = dot_product( mo_a(:,i), matmul(wrk1, mo_b(:,i)) )
-      wrk2(i) = dum
-      if (i > noccb) then
-        cycle
-      else
-        a = a+dum*dum
-        b = b*dum*dum
-        c = c+(1.0_dp/max((dum*dum),tol))
-      end if
-    end do
-
-    f = 1
-    if (mrsfs) then
-      ! Singlet spin quantum number
-      ss = 0
-      do i = 1, nocca
-        do j = 1, norb-noccb
-          ! cv
-          if ((j > 2).and.(i <= noccb)) then
-            ss = ss + (nocca-1-a + (wrk2(i))**2 - b /  &
-            (max(abs(wrk2(i)), tol))**2) * (bvec_mo(i,j,js))**2
-          ! co
-          else if (i <= noccb) then
-            ss = ss + (nocca-1-a + (wrk2(i))**2 - (wrk2(j+noccb))**2 &
-              - b * ((wrk2(j+noccb)) / max(abs(wrk2(i)), tol))**2) &
-              * (bvec_mo(i,j,js))**2
-          ! ov, os
-          else if ((j > 2) .or. (i == noccb+j)) then
-            ss = ss+(nocca-1-a-b)*(bvec_mo(i,j,js))**2
-          ! g, d
-          else
-            ss = ss + half * (nocca-1-a - (wrk2(noccb+j))**2 &
-             + (wrk2(noccb+j))**2 * b * (nocca-1-c - 1.0d0 / &
-             (max(abs(wrk2(noccb+j)), tol))**2)) &
-             * (bvec_mo(i,j,js))**2
-
-            f = f+half*(-1+a*(wrk2(noccb+j))**2)*(bvec_mo(i,j,js))**2
-          end if
-        end do
-      end do
-
-    else if (mrsft) then
-      ! Triplet spin quantum number
-      ss = 0
-      do i = 1, nocca
-        do j = 1, norb-noccb
-          ! cv
-          if ((j > 2).and.(i <= noccb)) then
-            ss = ss + (nocca-1 - a + (wrk2(i))**2 &
-             + b * (1.0d0 / max(abs(wrk2(i)), tol))**2) &
-             * (bvec_mo(i,j,js))**2
-          ! co
-          else if (i <= noccb) then
-            ss = ss + (nocca-1 - a + (wrk2(i))**2 - (wrk2(j+noccb))**2 &
-                  + b * ( (wrk2(j+noccb) / &
-                  max(abs(wrk2(i)),tol))**2 )) * (bvec_mo(i,j,js))**2
-          ! ov, ot
-          else if ((j > 2) .or. (i == noccb+j)) then
-            ss = ss+(nocca-1-a+b)*(bvec_mo(i,j,js))**2
-          end if
-        end do
-      end do
+    if (.not. mrsfs) then
+      ss = 2.0_dp
+      return
     end if
 
-    ! Normalization
-    ss = ss/f
+    total = sum(bvec_mo(1:nocca*(nbf-noccb))**2)
+    cv = 0.0_dp
+    do j = 3, nbf-noccb
+      cv = cv + sum(bvec_mo((j-1)*nocca+1:(j-1)*nocca+noccb)**2)
+    end do
+    ss = 0.0_dp
+    if (total > 0.0_dp) ss = 2.0_dp*cv/total
 
-    return
+  end subroutine mrsfssq
 
+!###############################################################################
+
+!> Compute the <S^2> expectation value of a UMRSF-TDDFT response state
+!>
+!> Evaluate the explicitly paired response state Psi=(Phi+eta F Phi)/sqrt(2),
+!> where F=Ry(pi), eta=+1/-1 for singlet/triplet parity and Phi=sum T_ia E+_ia.
+!> T is reconstructed from the packed CO, OV, CV and OO amplitudes below.
+!> Both <Phi|S^2|Phi> and <Phi|S^2 F|Phi>, and the full norm
+!> <Phi|Phi>+eta<Phi|F|Phi>, retain the complete alpha/beta MO overlap matrix.
+!> A full SVD of the occupied-alpha/core-beta overlap reduces the opposite-parent
+!> determinant cofactors to products of singular values, including exact zeros.
+!> The two complementary occupied-alpha directions must be retained.
+!> No diagonal-overlap or squared-amplitude-only approximation is made.
+!> For identical alpha/beta orbitals this reduces to mrsfssq; for unrestricted
+!> parents spin parity alone does not imply a pure total-spin eigenstate.
+!>
+  subroutine umrsfssqu(ss, mo_a, mo_b, smat, wrk1, wrk2, nbf, nbf2, xvec_dim, js, &
+                       norb, bvec_mo, nocca, noccb, mrsfs, mrsft)
+    use mathlib, only: unpack_f90
+    use messages, only: show_message, with_abort
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+    implicit none
+    integer, intent(in) :: nbf, nbf2, xvec_dim, js, norb, nocca, noccb
+    logical, intent(in) :: mrsfs, mrsft
+    real(dp), intent(in) :: mo_a(:,:), mo_b(:,:), smat(:)
+    real(dp), intent(in) :: bvec_mo(nocca,norb-noccb,*)
+    real(dp), intent(inout) :: wrk1(:,:), wrk2(:)
+    real(dp), intent(out) :: ss
+    real(dp), allocatable :: sa(:,:), overlap(:,:), core(:,:), u(:,:), t(:,:), v(:,:), r(:,:), work(:)
+    real(dp), allocatable :: prefix(:), suffix(:)
+    real(dp) :: query(1), unused_vt(1,1), scale, eta, norm, cross_norm, same, cross, physical_norm
+    real(dp) :: product_all, product_except, fuv, cross_coefficient, trace_r
+    integer :: nv, o1, o2, q, info, lwork, ok
+
+    ! Observable of Psi=(Phi+eta Ry(pi)Phi)/sqrt(2), Phi=sum T_ia E+_ia.
+    ! The packed OO fold below defines the paired-state extension to UMRSF.
+    ! Spin parity eta does not imply a pure total spin for unrestricted MOs.
+    ! Keep all alpha/beta overlaps and configuration cross terms. A diagonal
+    ! overlap approximation fails even for a single C->V excitation.
+    if (nocca /= noccb+2 .or. norb < nocca .or. (mrsfs .eqv. mrsft)) &
+      call show_message('UMRSF spin square: invalid two-SOMO spin sector', with_abort)
+    nv = norb-noccb; o1 = noccb+1; o2 = noccb+2
+    allocate(sa(nbf,nocca), overlap(nocca,norb), core(nocca,noccb), u(nocca,nocca), &
+             t(nocca,nv), v(nocca,nv), r(nocca,nocca), &
+             prefix(0:noccb), suffix(1:noccb+1), stat=ok)
+    if (ok /= 0) call show_message('UMRSF spin square: cannot allocate memory', with_abort)
+    call unpack_f90(smat, wrk1, 'u')
+    call dgemm('N','N',nbf,nocca,nbf,1.0_dp,wrk1,nbf,mo_a,nbf,0.0_dp,sa,nbf)
+    call dgemm('T','N',nocca,norb,nbf,1.0_dp,sa,nbf,mo_b,nbf,0.0_dp,overlap,nocca)
+    eta = -1.0_dp
+    if (mrsfs) eta = 1.0_dp
+    scale = maxval(abs(bvec_mo(:,:,js)))
+    if (.not. ieee_is_finite(scale) .or. scale == 0.0_dp) &
+      call show_message('UMRSF spin square: zero or invalid response vector', with_abort)
+    t = bvec_mo(:,:,js)/scale
+    t(o2,2) = -eta*t(o1,1)*0.5_dp
+    t(o1,1) = t(o1,1)*0.5_dp
+    if (mrsfs) then
+      t(o2,1) = t(o2,1)/sqrt(2.0_dp)
+      t(o1,2) = t(o1,2)/sqrt(2.0_dp)
+    else
+      t(o2,1) = 0.0_dp; t(o1,2) = 0.0_dp
+    end if
+
+    ! Full U includes the TWO complementary occupied-alpha directions. The
+    ! SVD is only a coordinate change inside this observable, not an MO rotation
+    ! in the caller. Cofactor products remain defined at zero singular values.
+    u = 0.0_dp
+    do q = 1, nocca
+      u(q,q) = 1.0_dp
+    end do
+    if (noccb > 0) then
+      core = overlap(:,1:noccb)
+      call dgesvd('A','N',nocca,noccb,core,nocca,wrk2,u,nocca,unused_vt,1,query,-1,info)
+      if (info /= 0) call show_message('UMRSF spin square: SVD workspace query failed', with_abort)
+      lwork = max(1,int(query(1)))
+      allocate(work(lwork), stat=ok)
+      if (ok /= 0) call show_message('UMRSF spin square: cannot allocate SVD workspace', with_abort)
+      core = overlap(:,1:noccb)
+      call dgesvd('A','N',nocca,noccb,core,nocca,wrk2,u,nocca,unused_vt,1,work,lwork,info)
+      if (info /= 0) call show_message('UMRSF spin square: SVD did not converge', with_abort)
+      deallocate(work)
+    end if
+    v = matmul(transpose(u),overlap(:,noccb+1:norb))
+    t = matmul(transpose(u),t)
+    call dgemm('N','T',nocca,nocca,nv,1.0_dp,t,nocca,v,nocca,0.0_dp,r,nocca)
+    norm = sum(t*t)
+    trace_r = 0.0_dp
+    do q = 1, nocca
+      trace_r = trace_r+r(q,q)
+    end do
+    same = (1.0_dp+sum(1.0_dp-wrk2(1:noccb)**2))*norm-sum(r*r)+trace_r**2
+    do q = 1, noccb
+      same = same+wrk2(q)**2*sum(t(q,:)**2)
+    end do
+
+    prefix(0) = 1.0_dp; suffix(noccb+1) = 1.0_dp
+    do q = 1, noccb
+      prefix(q) = prefix(q-1)*wrk2(q)**2
+    end do
+    do q = noccb, 1, -1
+      suffix(q) = suffix(q+1)*wrk2(q)**2
+    end do
+    product_all = prefix(noccb)
+    fuv = r(o1,o2)**2+r(o2,o1)**2-2.0_dp*r(o1,o1)*r(o2,o2)
+    cross_norm = product_all*fuv
+    cross_coefficient = product_all
+    cross = -product_all*(sum(t(o1,:)**2)+sum(t(o2,:)**2))
+    do q = 1, noccb
+      product_except = prefix(q-1)*suffix(q+1)
+      cross_coefficient = cross_coefficient+(wrk2(q)**2-1.0_dp)*product_except
+      cross = cross-product_except*(r(q,o1)**2+r(o1,q)**2-2.0_dp*r(q,q)*r(o1,o1) &
+                                   +r(q,o2)**2+r(o2,q)**2-2.0_dp*r(q,q)*r(o2,o2))
+    end do
+    cross = cross+cross_coefficient*fuv
+    physical_norm = norm+eta*cross_norm
+    ! A nonzero packed vector can map to a null paired state. Never replace its
+    ! norm by a floor or report a spurious finite expectation value.
+    if (.not. ieee_is_finite(physical_norm) .or. &
+        physical_norm <= 64.0_dp*epsilon(norm)*norm) &
+      call show_message('UMRSF spin square: null or ill-conditioned paired-state norm', with_abort)
+    ss = (same+eta*cross)/physical_norm
+    if (.not. ieee_is_finite(ss)) call show_message('UMRSF spin square: nonfinite expectation', with_abort)
+    deallocate(sa,overlap,core,u,t,v,r,prefix,suffix)
   end subroutine umrsfssqu
+
+  subroutine umrsfssq_quintet(ss, mo_a, mo_b, smat, wrk1, nbf, norb, bvec_mo, nocca, noccb, js)
+    use mathlib, only: unpack_f90
+    use messages, only: show_message, with_abort
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+    implicit none
+    integer, intent(in) :: nbf, norb, nocca, noccb, js
+    real(dp), intent(in) :: mo_a(:,:), mo_b(:,:), smat(:)
+    real(dp), intent(in) :: bvec_mo(noccb,norb-nocca,*)
+    real(dp), intent(inout) :: wrk1(:,:)
+    real(dp), intent(out) :: ss
+    real(dp), allocatable :: sb(:,:), overlap(:,:), t(:,:), v(:,:), r(:,:), ct(:,:)
+    real(dp) :: scale, norm, exchange, trace_r
+    integer :: nv, q, ok
+
+    ! Ms=2 beta-core -> alpha-virtual excitations of R+ are orthonormal.
+    ! S^2=6+N_beta-spin_exchange, with N_beta=Nc-1 after excitation.
+    ! For unrestricted parents S can exceed 2; a fixed 6 is valid only in the
+    ! spin-pure limit. This changes the observable, not the quintet response.
+    if (nocca /= noccb+2 .or. noccb < 1 .or. norb <= nocca) &
+      call show_message('UMRSF spin square: empty or invalid quintet response space', with_abort)
+    nv = norb-nocca
+    allocate(sb(nbf,noccb),overlap(noccb,norb),t(noccb,nv),v(noccb,nv), &
+             r(noccb,noccb),ct(nocca,nv),stat=ok)
+    if (ok /= 0) call show_message('UMRSF spin square: cannot allocate quintet workspace', with_abort)
+    call unpack_f90(smat,wrk1,'u')
+    call dgemm('N','N',nbf,noccb,nbf,1.0_dp,wrk1,nbf,mo_b,nbf,0.0_dp,sb,nbf)
+    call dgemm('T','N',noccb,norb,nbf,1.0_dp,sb,nbf,mo_a,nbf,0.0_dp,overlap,noccb)
+    scale = maxval(abs(bvec_mo(:,:,js)))
+    if (.not. ieee_is_finite(scale) .or. scale == 0.0_dp) &
+      call show_message('UMRSF spin square: zero or invalid quintet response vector', with_abort)
+    t = bvec_mo(:,:,js)/scale
+    norm = sum(t*t)
+    if (.not. ieee_is_finite(norm) .or. norm <= 0.0_dp) &
+      call show_message('UMRSF spin square: invalid quintet state norm', with_abort)
+    v = overlap(:,nocca+1:norb)
+    call dgemm('N','T',noccb,noccb,nv,1.0_dp,t,noccb,v,noccb,0.0_dp,r,noccb)
+    call dgemm('T','N',nocca,nv,noccb,1.0_dp,overlap,noccb,t,noccb,0.0_dp,ct,nocca)
+    exchange = 0.0_dp; trace_r = 0.0_dp
+    do q = 1, noccb
+      exchange = exchange+1.0_dp-sum(overlap(q,1:nocca)**2)
+      trace_r = trace_r+r(q,q)
+    end do
+    ss = 5.0_dp+exchange+(sum(ct*ct)-sum(r*r)+trace_r**2)/norm
+    if (.not. ieee_is_finite(ss)) call show_message('UMRSF spin square: nonfinite quintet expectation', with_abort)
+    deallocate(sb,overlap,t,v,r,ct)
+  end subroutine umrsfssq_quintet
+
 
 !###############################################################################
 
@@ -4335,7 +4449,7 @@ contains
     logical :: bab,bcd,bsame
     integer :: i, j, k, l, n, v, c
     real(kind=dp) :: val, xval, cval
-    integer :: mythread
+    integer :: mythread, last_pair, last_mixed, general_channel
 
     bab=shell_block%shells(1)==shell_block%shells(2)
     bcd=shell_block%shells(3)==shell_block%shells(4)
@@ -4343,6 +4457,9 @@ contains
     mythread = thread_id
 
     if (.not.this%tamm_dancoff) return
+    last_pair=merge(0,8,this%general_only)
+    last_mixed=merge(8,10,this%general_only)
+    general_channel=merge(1,11,this%general_only)
 
     associate ( f3 => this%f3(:,:,:,:,mythread), &
                 d3 => this%d3, &
@@ -4399,7 +4516,7 @@ contains
           ! Coulomb (columns 1:8): the 8 permutational contributions collapse
           ! to 4 distinct Fock targets, each reading one symmetric ds slab:
           ! f(ij)+=c[d(kl)+d(lk)], f(ji) likewise, f(kl)+=c[d(ij)+d(ji)], f(lk) likewise.
-          do c = 1, 8
+          do c = 1, last_pair
             do v = 1, nf
               f3(v,c,i,j) = f3(v,c,i,j) + cval*ds(v,c,k,l)
               f3(v,c,j,i) = f3(v,c,j,i) + cval*ds(v,c,k,l)
@@ -4409,7 +4526,7 @@ contains
           end do
 
           ! Exchange (columns 1:8 and the general column 11).
-          do c = 1, 8
+          do c = 1, last_pair
             do v = 1, nf
               f3(v,c,i,k) = f3(v,c,i,k) - xval*d3(v,c,j,l)
               f3(v,c,k,i) = f3(v,c,k,i) - xval*d3(v,c,l,j)
@@ -4422,19 +4539,19 @@ contains
             end do
           end do
           do v = 1, nf
-            f3(v,11,i,k) = f3(v,11,i,k) - xval*d3(v,11,j,l)
-            f3(v,11,k,i) = f3(v,11,k,i) - xval*d3(v,11,l,j)
-            f3(v,11,i,l) = f3(v,11,i,l) - xval*d3(v,11,j,k)
-            f3(v,11,l,i) = f3(v,11,l,i) - xval*d3(v,11,k,j)
-            f3(v,11,j,k) = f3(v,11,j,k) - xval*d3(v,11,i,l)
-            f3(v,11,k,j) = f3(v,11,k,j) - xval*d3(v,11,l,i)
-            f3(v,11,j,l) = f3(v,11,j,l) - xval*d3(v,11,i,k)
-            f3(v,11,l,j) = f3(v,11,l,j) - xval*d3(v,11,k,i)
+            f3(v,general_channel,i,k) = f3(v,general_channel,i,k) - xval*d3(v,11,j,l)
+            f3(v,general_channel,k,i) = f3(v,general_channel,k,i) - xval*d3(v,11,l,j)
+            f3(v,general_channel,i,l) = f3(v,general_channel,i,l) - xval*d3(v,11,j,k)
+            f3(v,general_channel,l,i) = f3(v,general_channel,l,i) - xval*d3(v,11,k,j)
+            f3(v,general_channel,j,k) = f3(v,general_channel,j,k) - xval*d3(v,11,i,l)
+            f3(v,general_channel,k,j) = f3(v,general_channel,k,j) - xval*d3(v,11,l,i)
+            f3(v,general_channel,j,l) = f3(v,general_channel,j,l) - xval*d3(v,11,i,k)
+            f3(v,general_channel,l,j) = f3(v,general_channel,l,j) - xval*d3(v,11,k,i)
           end do
 
           ! Mixed alpha/beta spin-pair channels use the GAMESS-compatible
           ! exchange permutation for UMRSF open-shell pair densities.
-          do c = 9, 10
+          do c = 9, last_mixed
             do v = 1, nf
               f3(v,c,i,l) = f3(v,c,i,l) - xval*d3(v,c,k,j)
               f3(v,c,l,i) = f3(v,c,l,i) - xval*d3(v,c,j,k)
@@ -4491,14 +4608,14 @@ contains
 
           xval = val * this%scale_exchange
           do v = 1, nf
-            f3(v,11,i,k) = f3(v,11,i,k) - xval*d3(v,11,j,l)
-            f3(v,11,k,i) = f3(v,11,k,i) - xval*d3(v,11,l,j)
-            f3(v,11,i,l) = f3(v,11,i,l) - xval*d3(v,11,j,k)
-            f3(v,11,l,i) = f3(v,11,l,i) - xval*d3(v,11,k,j)
-            f3(v,11,j,k) = f3(v,11,j,k) - xval*d3(v,11,i,l)
-            f3(v,11,k,j) = f3(v,11,k,j) - xval*d3(v,11,l,i)
-            f3(v,11,j,l) = f3(v,11,j,l) - xval*d3(v,11,i,k)
-            f3(v,11,l,j) = f3(v,11,l,j) - xval*d3(v,11,k,i)
+            f3(v,general_channel,i,k) = f3(v,general_channel,i,k) - xval*d3(v,11,j,l)
+            f3(v,general_channel,k,i) = f3(v,general_channel,k,i) - xval*d3(v,11,l,j)
+            f3(v,general_channel,i,l) = f3(v,general_channel,i,l) - xval*d3(v,11,j,k)
+            f3(v,general_channel,l,i) = f3(v,general_channel,l,i) - xval*d3(v,11,k,j)
+            f3(v,general_channel,j,k) = f3(v,general_channel,j,k) - xval*d3(v,11,i,l)
+            f3(v,general_channel,k,j) = f3(v,general_channel,k,j) - xval*d3(v,11,l,i)
+            f3(v,general_channel,j,l) = f3(v,general_channel,j,l) - xval*d3(v,11,i,k)
+            f3(v,general_channel,l,j) = f3(v,general_channel,l,j) - xval*d3(v,11,k,i)
           end do
               end do
             end do
@@ -4637,6 +4754,120 @@ contains
       sigma(pair%slot(i),:)=sigma(pair%slot(i),:)+y(i,:)
     end do
   end subroutine
+
+  ! UMRSF: the same correction from six SOMO images, alpha and beta separately.
+  logical function umrsf_pair_allowed(infos,ca,cb,cam,petite,limit_bytes) result(on)
+    use types, only: information
+    implicit none
+    type(information),intent(in)::infos
+    real(dp),intent(in)::ca(:,:),cb(:,:)
+    logical,intent(in)::cam,petite
+    integer(8),intent(in),optional::limit_bytes
+    integer(8)::limit
+    integer::n
+    on=.false.
+    if(.not.infos%tddft%pair_cache)return
+    if(.not.infos%tddft%umrsf.or.cam.or.petite.or.infos%control%mrsf_fp32/=0)return
+    if(infos%tddft%mult/=1.and.infos%tddft%mult/=3)return
+    if(infos%mol_prop%nelec_a-infos%mol_prop%nelec_b/=2)return
+    if(abs(infos%tddft%hfscale)<=epsilon(1.0_dp))return
+    n=size(ca,1)
+    limit=256_8*1024_8*1024_8
+    if(present(limit_bytes))limit=limit_bytes
+    ! Bound the persistent quadratic correction, not total process memory.
+    if(32_8*int(n-2,8)**2>limit)return
+    on=.true.
+  end function
+
+  subroutine umrsf_pair_setup(pair,infos,driver,ca,cb,scale)
+    use types, only: information
+    use int2_compute, only: int2_compute_t
+    use messages, only: show_message,with_abort
+    implicit none
+    type(mrsf_pair_t),intent(out)::pair
+    type(information),intent(in)::infos
+    type(int2_compute_t),intent(inout)::driver
+    real(dp),intent(in)::ca(:,:),cb(:,:),scale
+    type(int2_umrsf_data_t)::data
+    real(dp),allocatable,target::density(:,:,:,:)
+    real(dp),allocatable::images(:,:,:)
+    integer::n,o1,o2,k,mu,nu,ok
+    n=size(ca,1);o2=infos%mol_prop%nelec_a;o1=o2-1
+    allocate(density(6,11,n,n),images(n,n,6),stat=ok)
+    if(ok/=0)call show_message('UMRSF pair setup: cannot allocate matrices',with_abort)
+    density=0
+    do nu=1,n
+      do mu=1,n
+        density(1,11,mu,nu)=ca(mu,o1)*ca(nu,o1)
+        density(2,11,mu,nu)=ca(mu,o2)*ca(nu,o2)
+        density(3,11,mu,nu)=ca(mu,o1)*ca(nu,o2)
+        density(4,11,mu,nu)=cb(mu,o1)*cb(nu,o1)
+        density(5,11,mu,nu)=cb(mu,o2)*cb(nu,o2)
+        density(6,11,mu,nu)=cb(mu,o1)*cb(nu,o2)
+      end do
+    end do
+    data%d3=>density;data%general_only=.true.
+    data%scale_exchange=scale;data%scale_coulomb=scale
+    call driver%run(data)
+    do k=1,6
+      images(:,:,k)=-data%f3(k,1,:,:,1)
+    end do
+    call umrsf_pair_matrix(pair,infos,ca,cb,images)
+    call data%clean()
+  end subroutine
+
+  subroutine umrsf_pair_matrix(pair,infos,ca,cb,images)
+    use types, only: information
+    use messages, only: show_message,with_abort
+    implicit none
+    type(mrsf_pair_t),intent(out)::pair
+    type(information),intent(in)::infos
+    real(dp),intent(in)::ca(:,:),cb(:,:),images(:,:,:)
+    real(dp),allocatable::b(:,:,:,:),tmp(:,:)
+    integer::n,nc,nv,na,m,i,j,a,v1,v2,ok,k
+    real(dp)::sgn,cc,vv,cv,d
+    n=size(ca,1);nc=infos%mol_prop%nelec_b;na=nc+2;nv=n-na;m=2*(nc+nv)
+    allocate(pair%matrix(m,m),pair%slot(m),b(n,n,6,2),tmp(n,n),stat=ok)
+    if(ok/=0)call show_message('UMRSF pair matrix: cannot allocate correction',with_abort)
+    ! Opposite-spin SOMO images supply CC/VV; same-spin images supply CO/OV.
+    do k=1,6
+      call dgemm('t','n',n,n,n,1.0_dp,ca,n,images(:,:,k),n,0.0_dp,tmp,n)
+      call dgemm('n','n',n,n,n,1.0_dp,tmp,n,ca,n,0.0_dp,b(:,:,k,1),n)
+      call dgemm('t','n',n,n,n,1.0_dp,cb,n,images(:,:,k),n,0.0_dp,tmp,n)
+      call dgemm('n','n',n,n,n,1.0_dp,tmp,n,cb,n,0.0_dp,b(:,:,k,2),n)
+    end do
+    pair%matrix=0
+    sgn=merge(1.0_dp,-1.0_dp,infos%tddft%mult==1)
+    cc=sgn*infos%tddft%spc_coco/infos%tddft%hfscale
+    vv=sgn*infos%tddft%spc_ovov/infos%tddft%hfscale
+    cv=sgn*infos%tddft%spc_coov/infos%tddft%hfscale
+    do i=1,nc
+      pair%slot(i)=i;pair%slot(nc+i)=na+i
+      do j=1,nc
+        pair%matrix(i,j)=cc*b(i,j,5,1)
+        pair%matrix(i,nc+j)=-cc*b(i,j,6,1)
+        pair%matrix(nc+i,j)=-cc*b(j,i,6,1)
+        pair%matrix(nc+i,nc+j)=cc*b(i,j,4,1)
+      end do
+    end do
+    do i=1,nv
+      a=na+i;v1=2*nc+i;v2=v1+nv
+      pair%slot(v1)=(a-nc-1)*na+na-1
+      pair%slot(v2)=pair%slot(v1)+1
+      do j=1,nv
+        pair%matrix(v1,2*nc+j)=vv*b(a,na+j,2,2)
+        pair%matrix(v1,2*nc+nv+j)=-vv*b(a,na+j,3,2)
+        pair%matrix(v2,2*nc+j)=-vv*b(na+j,a,3,2)
+        pair%matrix(v2,2*nc+nv+j)=vv*b(a,na+j,1,2)
+      end do
+      do j=1,nc
+        d=0.5_dp*cv*(b(j,a,3,1)-b(a,j,3,1)+b(j,a,6,2)-b(a,j,6,2))
+        pair%matrix(j,v2)=d;pair%matrix(v2,j)=d
+        pair%matrix(nc+j,v1)=-d;pair%matrix(v1,nc+j)=-d
+      end do
+    end do
+  end subroutine
+
 
 
   ! Project the sole dynamic exchange image; static spin-pair terms are added separately.

@@ -6,7 +6,8 @@ response Fock matrices afterwards.  A buffer missing from that reduction, or a
 rank-local quantity used before it, changes the excitation energies with the
 rank count.  Covered: the closed-shell singlet and triplet branches, the
 CONTIGUOUS MO-pointer consumer (GGA and the meta-GGA ``moG1`` branch), the
-spin-antisymmetric triplet contraction and the CAM two-pass integrals.
+spin-antisymmetric triplet contraction, the CAM two-pass integrals, and the
+UMRSF quintet operator (HF, global hybrid and CAM) in the complete response space.
 
 Runs only with mpi4py and an MPI launcher.  ``OQP_REQUIRE_MPI_TESTS=1`` (set
 in the CI MPI leg) turns the skip into a failure, so a broken MPI environment
@@ -71,6 +72,65 @@ def _run(text, nrank, launcher):
         return proc.returncode, ev, proc.stdout.decode(errors="ignore")[-1500:] + log[-2000:]
 
 
+def _quintet_snapshot(functional, nrank, launcher):
+    # Use full-precision eigenpairs, not rounded energies from the summary.
+    text = ("[input]\nsystem=\n C 0 0 0.104\n H 0 0.862 -0.468\n"
+            " H 0 -0.862 -0.468\nbasis=sto-3g\nruntype=energy\nmethod=tdhf\n"
+            f"functional={functional}\n[guess]\ntype=huckel\n"
+            "[scf]\ntype=uhf\nmultiplicity=3\nconv=1e-10\nmaxit=200\n"
+            "[tdhf]\ntype=umrsf\nmultiplicity=5\nnstate=6\nconv=1e-10\nmaxit=100\n")
+    script = """
+import oqp
+import json
+import numpy as np
+from pathlib import Path
+from oqp.pyoqp import Runner
+from oqp.utils.mpi_utils import MPIManager
+r = Runner(input_file='job.inp', log='job.log')
+r.run()
+d = r.mol.data
+assert r.mol.mol_energy.Davidson_converged
+assert d['nelec_A'] == 5 and d['nelec_B'] == 3
+payload = dict(energies=np.array(d['OQP::td_energies']).ravel().tolist(),
+               vectors=np.array(d['OQP::td_bvec_mo']).reshape(6, 6).T.tolist(),
+               a=np.array(d['OQP::VEC_MO_A']).T.tolist(),
+               b=np.array(d['OQP::VEC_MO_B']).T.tolist(),
+               overlap=np.array(d['OQP::SM']).ravel().tolist(),
+               hamilton=int(d['hamilton']), cam_flag=bool(d['dft'].cam_flag),
+               cam=[float(d[k]) for k in ('cam_alpha', 'cam_beta', 'cam_mu')],
+               ranks=MPIManager().size)
+manager = MPIManager()
+all_ranks = manager.comm.allgather(payload) if manager.use_mpi else [payload]
+# Native outputs must be valid on every rank, including non-root ranks.
+for item in all_ranks:
+    for key in ('energies', 'vectors', 'a', 'b', 'overlap'):
+        value = np.asarray(item[key])
+        assert np.isfinite(value).all()
+        np.testing.assert_allclose(value, all_ranks[0][key], rtol=0, atol=1e-9,
+                                   equal_nan=False)
+if manager.rank == 0:
+    Path('quintet.json').write_text(json.dumps(payload, allow_nan=False))
+manager.barrier()
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root/'job.inp').write_text(text)
+        cmd = [sys.executable, '-c', script]
+        if nrank > 1:
+            cmd = [launcher, '-n', str(nrank), '--oversubscribe', '--bind-to', 'none'] + cmd
+        proc = subprocess.run(cmd, cwd=tmp, env=dict(os.environ, OMP_NUM_THREADS='1'),
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900)
+        assert proc.returncode == 0, proc.stdout.decode(errors='replace')[-4000:]
+        log = (root/'job.log').read_text()
+        if nrank > 1:
+            # This banner comes from native pe%size/use_mpi, not mpi4py alone:
+            # launching multiple copies of a serial library must not pass.
+            assert re.search(rf'MPI Processors:\s+{nrank}\b', log), log[-4000:]
+        result = json.loads((root/'quintet.json').read_text())
+        assert result['ranks'] == nrank
+        return result
+
+
 class TestTddftUnderMpi(unittest.TestCase):
     def setUp(self):
         self.launcher = _launcher()
@@ -92,6 +152,54 @@ class TestTddftUnderMpi(unittest.TestCase):
                     self.assertEqual(len(e), 4, d)
                     for a, b in zip(e0, e):
                         self.assertAlmostEqual(a, b, delta=1e-6)
+
+    def test_umrsf_quintet_operator_independent_of_rank_count(self):
+        import numpy as np
+        for functional in ('', 'bhhlyp', 'cam-b3lyp'):
+            matrices = []
+            energies = []
+            orbitals = []
+            for nrank in (1, *RANKS):
+                with self.subTest(functional=functional or 'HF', ranks=nrank):
+                    result = _quintet_snapshot(functional, nrank, self.launcher)
+                    if functional == 'cam-b3lyp':
+                        self.assertEqual(result['hamilton'], 20)
+                        self.assertTrue(result['cam_flag'])
+                        np.testing.assert_allclose(result['cam'], [0.19, 0.46, 0.33],
+                                                   rtol=0, atol=1e-12, equal_nan=False)
+                    e = np.asarray(result['energies'])
+                    x = np.asarray(result['vectors'])
+                    self.assertEqual(e.shape, (6,))
+                    self.assertEqual(x.shape, (6, 6))
+                    self.assertTrue(np.isfinite(e).all() and np.isfinite(x).all())
+                    np.testing.assert_allclose(x.T@x, np.eye(6), rtol=0, atol=1e-10,
+                                               equal_nan=False)
+                    a = np.asarray(result['a'])
+                    b = np.asarray(result['b'])
+                    overlap = np.zeros((7, 7))
+                    overlap[np.tril_indices(7)] = result['overlap']
+                    overlap += np.tril(overlap, -1).T
+                    self.assertTrue(all(np.isfinite(v).all() for v in (a, b, overlap)))
+                    orbitals.append((a, b))
+                    a0, b0 = orbitals[0]
+                    uc = b0[:, :3].T@overlap@b[:, :3]
+                    uv = a0[:, 5:].T@overlap@a[:, 5:]
+                    np.testing.assert_allclose(uc.T@uc, np.eye(3), rtol=0, atol=1e-9,
+                                               equal_nan=False)
+                    np.testing.assert_allclose(uv.T@uv, np.eye(2), rtol=0, atol=1e-9,
+                                               equal_nan=False)
+                    transform = np.kron(uv, uc)
+                    # Express each response matrix in the serial MO gauge.
+                    matrix = transform@((x*e)@x.T)@transform.T
+                    self.assertTrue(np.isfinite(matrix).all())
+                    energies.append(e)
+                    matrices.append(matrix)
+                    # Signed matrix elements retain the operator's signs while
+                    # removing the arbitrary phase of individual Ritz vectors.
+                    np.testing.assert_allclose(e, energies[0], rtol=0, atol=1e-9,
+                                               equal_nan=False)
+                    np.testing.assert_allclose(matrix, matrices[0], rtol=0, atol=1e-9,
+                                               equal_nan=False)
 
 
 class TestLauncherProbe(unittest.TestCase):

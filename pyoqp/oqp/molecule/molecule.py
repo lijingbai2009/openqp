@@ -578,7 +578,14 @@ class Molecule:
 
             irrep = product_irrep(list(alpha[:na]) + list(beta[:nb]), table)
             state = {'irrep': irrep, 'nelec_alpha': na, 'nelec_beta': nb}
-            multiplicity = getattr(self, 'mult', None)
+            # The native SCF reference can differ from both the constructor's
+            # default and the response target (e.g. triplet ROHF -> quintet).
+            native = getattr(self.data, '_data', None)
+            reference = getattr(native, 'mol_prop', None)
+            multiplicity = getattr(reference, 'mult', None)
+            if multiplicity is None:
+                multiplicity = self.config.get('scf', {}).get(
+                    'multiplicity', getattr(self, 'mult', None))
             if multiplicity:
                 state['multiplicity'] = int(multiplicity)
                 state['term'] = f"{int(multiplicity)}{irrep.upper()}"
