@@ -34,6 +34,7 @@ Usage::
     driver.run_leftcc(method="left_ccsd")
     driver.run_ccp3(method="crcc23")
 """
+import errno
 import importlib
 import os
 import subprocess
@@ -186,6 +187,11 @@ def _lock_paths():
 
 _WINDOWS = os.name == "nt"
 
+#: errno values msvcrt.locking reports when another process holds the range:
+#: EDEADLOCK after LK_LOCK's ten one-second attempts, EACCES for a locking
+#: violation (Microsoft _locking documentation; CPython raises OSError from errno).
+_LOCK_CONTENTION_ERRNOS = frozenset({getattr(errno, "EDEADLOCK", errno.EDEADLK), errno.EACCES})
+
 
 class _install_lock:
     """Exclusive lock serializing the CCpy install for one environment."""
@@ -206,13 +212,16 @@ class _install_lock:
                 self._fh.seek(0)
                 self._unlock = lambda: msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
                 # LK_LOCK gives up after ten one-second attempts, far shorter
-                # than a CCpy build; keep waiting until the holder finishes.
+                # than a CCpy build; keep waiting while another process holds
+                # the lock. Any other error (EBADF, EINVAL, a filesystem
+                # without byte-range locks) is permanent and propagates.
                 while True:
                     try:
                         msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
                         break
-                    except OSError:
-                        continue
+                    except OSError as exc:
+                        if exc.errno not in _LOCK_CONTENTION_ERRNOS:
+                            raise
             else:
                 import fcntl
                 self._unlock = lambda: fcntl.flock(self._fh, fcntl.LOCK_UN)

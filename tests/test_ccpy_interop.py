@@ -8,6 +8,7 @@ importable; CCpy is then downloaded on demand by ensure_ccpy(), and a failed
 download or build fails the test.
 """
 
+import errno
 import importlib.util
 import json
 import os
@@ -182,25 +183,49 @@ def test_driver_rejects_invalid_requests_before_installing(monkeypatch, config, 
         ccpy_interop.driver_from_openqp(types.SimpleNamespace(config=config), **kwargs)
 
 
-def test_windows_install_lock_waits_past_lk_lock_timeouts(monkeypatch, tmp_path):
-    """msvcrt.LK_LOCK raises OSError after ten one-second attempts; the lock
-    must keep waiting, because a CCpy build takes much longer."""
+def _fake_msvcrt(monkeypatch, tmp_path, failures):
+    """msvcrt whose LK_LOCK raises the given OSErrors, then succeeds."""
     attempts = []
     fake = types.ModuleType("msvcrt")
     fake.LK_LOCK, fake.LK_UNLCK = 1, 0
+    pending = list(failures)
 
     def locking(fd, mode, nbytes):
         attempts.append(mode)
-        if mode == fake.LK_LOCK and attempts.count(fake.LK_LOCK) <= 2:
-            raise OSError("Resource deadlock avoided")
+        if mode == fake.LK_LOCK and pending:
+            raise pending.pop(0)
 
     fake.locking = locking
     monkeypatch.setitem(sys.modules, "msvcrt", fake)
     monkeypatch.setattr(ccpy_interop, "_WINDOWS", True)
     monkeypatch.setattr(ccpy_interop.sys, "prefix", str(tmp_path))
+    return fake, attempts
+
+
+def test_windows_install_lock_waits_past_lk_lock_timeouts(monkeypatch, tmp_path):
+    """msvcrt.LK_LOCK raises EDEADLOCK after ten one-second attempts (EACCES
+    for a locking violation); the lock must keep waiting, because a CCpy build
+    takes much longer."""
+    edeadlock = getattr(errno, "EDEADLOCK", errno.EDEADLK)
+    fake, attempts = _fake_msvcrt(monkeypatch, tmp_path, [
+        OSError(edeadlock, "Resource deadlock avoided"),
+        OSError(errno.EACCES, "Permission denied"),
+        OSError(edeadlock, "Resource deadlock avoided")])
     with ccpy_interop._install_lock():
         pass
-    assert attempts == [fake.LK_LOCK] * 3 + [fake.LK_UNLCK]
+    assert attempts == [fake.LK_LOCK] * 4 + [fake.LK_UNLCK]
+
+
+@pytest.mark.parametrize("err", [errno.EINVAL, errno.EBADF, None])
+def test_windows_install_lock_raises_permanent_errors(monkeypatch, tmp_path, err):
+    """A permanent locking error (e.g. no byte-range locks on the filesystem)
+    propagates after one attempt instead of retrying forever."""
+    exc = OSError(err, "locking not supported") if err else OSError("no errno")
+    fake, attempts = _fake_msvcrt(monkeypatch, tmp_path, [exc] * 1000)
+    with pytest.raises(OSError, match="locking not supported|no errno"):
+        with ccpy_interop._install_lock():
+            pytest.fail("lock acquired despite a permanent error")
+    assert attempts == [fake.LK_LOCK]
 
 
 class _CountData:
