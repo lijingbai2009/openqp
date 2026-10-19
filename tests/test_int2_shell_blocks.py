@@ -24,6 +24,16 @@ class ShellBlockContractions(unittest.TestCase):
                     os.environ["OQP_INT2_LAYOUT"] = layout
                 self._check("int2_shell_block_selftest", 44016)
 
+    def test_zero_scale_checks_under_forced_accumulator_mode(self):
+        # parallel_start sizes the Fock accumulator from OQP_FOCK_ATOMIC; the
+        # zero-scale checks then select each mode themselves and must resize
+        # the accumulator to match (one shared copy vs one per image).
+        for atomic in ("0", "1"):
+            with self.subTest(OQP_FOCK_ATOMIC=atomic), patch.dict(os.environ):
+                os.environ.pop("OQP_INT2_LAYOUT", None)
+                os.environ["OQP_FOCK_ATOMIC"] = atomic
+                self._check("int2_shell_block_selftest", 44016)
+
     def _check(self, symbol, expected_count):
         try:
             import oqp.runtime as runtime

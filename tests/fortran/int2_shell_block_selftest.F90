@@ -179,7 +179,15 @@ contains
                 x%scale_coulomb=sj(sc);x%scale_exchange=sk(sc)
                 x%num_passes=1;x%cur_pass=1
                 call x%parallel_start(basis,nt)
+                ! parallel_start sized f for the mode it chose (OQP_FOCK_ATOMIC
+                ! or the automatic memory rule).  Select the mode under test
+                ! and size the accumulator for it: one shared copy when
+                ! atomic, one copy per image otherwise.
                 x%atomic_fock=at==1
+                if (size(x%f,3)/=merge(1,nt,x%atomic_fock)) then
+                  deallocate(x%f)
+                  allocate(x%f(x%fockdim,x%nfocks,merge(1,nt,x%atomic_fock)),source=0.0_dp)
+                end if
                 x%shell_blocks=lay==2
                 x%shell_block_min=0
                 call zbuf%init(17)
