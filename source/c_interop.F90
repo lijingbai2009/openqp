@@ -394,6 +394,9 @@ contains
 !> @return       positive value:  success, returns size of the data
 !>               negative values: -1 - handle not initialized;
 !>                                -2 - data not available
+!>                                -3 - tagarray refused to create the record
+!>                                     (invalid tag, record conflict); no
+!>                                     pointer is returned
   function oqp_alloc(c_handle, tag, type_id, ndims, dims, v) result(n) bind(C, name='oqp_alloc')
     use strings, only: c_f_char
     use oqp_tagarray_driver, only: tagarray_get_cptr
@@ -420,6 +423,12 @@ contains
 
     ! 1. allocate the memory in container (override, if it already exists)
     status_ = inf%dat%create(tag_str, type_id, dims(:ndims), override=.true.)
+    ! A refused create must not fall through to the lookup below: whatever
+    ! record that lookup finds was not created by this call, and the caller
+    ! would copy its own buffer into storage of a different size.
+    v = c_null_ptr
+    n = -3
+    if (status_ /= TA_OK) return
     ! 2. Get the pointer to the freshly allocated data
     n = tagarray_get_cptr(inf%dat, tag_str, v, type_id, ndims, dims, data_size)
     if (.not.c_associated(v))  n = -2
