@@ -959,13 +959,13 @@ contains
     implicit none
 
     integer, intent(in) :: ndsr
-    real(kind=dp), intent(out), dimension(:,:) :: bvec
+    real(kind=dp), intent(inout), dimension(:,:) :: bvec
     real(kind=dp), intent(inout), dimension(:,:) :: q
     integer, intent(inout) :: novec, nvec
     integer, intent(out) :: ick
     logical, intent(in) :: tamm_dancoff
 
-    real(kind=dp) :: bq, fnorm, max_abs_overlap
+    real(kind=dp) :: bq, fnorm, max_abs_overlap, candidate_scale
     integer :: istat, k, ms, ndsrt, mxvec
     logical :: bad_vector
     real(kind=dp), parameter :: norm_threshold = 1.0D-09
@@ -983,6 +983,15 @@ contains
 
     do k = 1, ndsrt
       if (any(.not. ieee_is_finite(q(:,k)))) cycle
+      ! Dependence is a property of the direction, not the residual amplitude.
+      ! Scale before taking the norm so finite very small/large updates cannot
+      ! underflow/overflow. The later cutoff then measures the remaining norm
+      ! relative to this unit candidate, including for tightly converged roots.
+      candidate_scale = maxval(abs(q(:,k)))
+      if (candidate_scale == 0.0_dp) cycle
+      q(:,k) = q(:,k)/candidate_scale
+      fnorm = norm2(q(:,k))
+      q(:,k) = q(:,k)/fnorm
       max_abs_overlap = 0.0_dp
       bad_vector = .false.
 !     MGS: orthonormalize next vector w.r.t. all
