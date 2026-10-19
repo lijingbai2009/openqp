@@ -8,9 +8,11 @@ its threaded BLAS through dispatch_apply, which a forked child cannot use:
 without --forked.  The refusal turns that into one usage error naming the
 cause.  These tests pin both sides of the decision and the import it mirrors.
 """
-import builtins
+import importlib.util
 import os
 import re
+import sys
+import types
 
 import pytest
 
@@ -52,16 +54,58 @@ def test_unforked_session_never_probes_mpi(monkeypatch):
     conftest.pytest_configure(_Config(forked=False))
 
 
-@pytest.mark.parametrize("error", [ImportError, OSError])
-def test_probe_treats_a_missing_mpi_like_mpi_utils_does(monkeypatch, error):
-    real_import = builtins.__import__
+class _MissingLibmpiFinder:
+    """Meta-path finder that fails like mpi4py 4.x without an MPI library.
 
-    def failing_import(name, *args, **kwargs):
-        if name == "mpi4py" or name.startswith("mpi4py."):
-            raise error("no MPI here")
-        return real_import(name, *args, **kwargs)
-    monkeypatch.setattr(builtins, "__import__", failing_import)
+    mpi4py >= 4 imports ``mpi4py.MPI`` through ``mpi4py._mpiabi._Finder``,
+    whose ``find_spec`` dlopens libmpi and raises
+    ``RuntimeError("cannot load MPI library ...")`` when it is absent
+    (``_mpiabi._dlopen_libmpi``; reproduced with mpi4py 4.1.2 on zeus via
+    ``MPI4PY_LIBMPI=/nonexistent/libmpi.dylib``).
+    """
+
+    def __init__(self, error):
+        self.error = error
+
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "mpi4py.MPI":
+            raise self.error("cannot load MPI library\ndlopen(libmpi.dylib): no such file")
+        return None
+
+
+def _install_failing_mpi4py(monkeypatch, error):
+    """Make ``from mpi4py import MPI`` raise ``error``; monkeypatch restores it."""
+    package = types.ModuleType("mpi4py")
+    package.__path__ = []
+    monkeypatch.setitem(sys.modules, "mpi4py", package)
+    monkeypatch.delitem(sys.modules, "mpi4py.MPI", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_MissingLibmpiFinder(error)] + sys.meta_path)
+
+
+_NO_MPI_ERRORS = [ImportError, OSError, RuntimeError]
+
+
+@pytest.mark.parametrize("error", _NO_MPI_ERRORS)
+def test_probe_treats_a_missing_mpi_like_mpi_utils_does(monkeypatch, error):
+    _install_failing_mpi4py(monkeypatch, error)
     assert conftest._import_oqp_initialises_mpi() is False
+
+
+def test_forked_session_without_libmpi_is_allowed(monkeypatch):
+    # mpi4py installed, MPI library missing: a --forked run must start, not
+    # end in INTERNALERROR from the probe.
+    _install_failing_mpi4py(monkeypatch, RuntimeError)
+    conftest.pytest_configure(_Config(forked=True))
+
+
+@pytest.mark.parametrize("error", _NO_MPI_ERRORS)
+def test_mpi_utils_runs_serial_when_mpi_is_missing(monkeypatch, error):
+    # The probe is only right if ``import oqp`` survives the same failure.
+    _install_failing_mpi4py(monkeypatch, error)
+    spec = importlib.util.spec_from_file_location("_mpi_utils_without_mpi", _MPI_UTILS)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.mpi4py_available is False
 
 
 def test_probe_mirrors_the_import_in_mpi_utils():
@@ -70,4 +114,4 @@ def test_probe_mirrors_the_import_in_mpi_utils():
     with open(_MPI_UTILS, encoding="utf-8") as handle:
         source = handle.read()
     assert re.search(r"^try:\n\s+from mpi4py import MPI\n", source, re.M)
-    assert re.search(r"^except \(ImportError, OSError\)", source, re.M)
+    assert re.search(r"^except \(ImportError, OSError, RuntimeError\)", source, re.M)

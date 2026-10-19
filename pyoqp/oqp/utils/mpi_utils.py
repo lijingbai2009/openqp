@@ -3,10 +3,16 @@ import os
 import sys
 from collections.abc import Iterator
 
+# No MPI means: mpi4py is not installed (ImportError), its extension cannot be
+# loaded (OSError), or -- mpi4py >= 4 -- the MPI shared library itself is
+# missing.  mpi4py 4.x resolves the MPI ABI in a meta-path finder
+# (mpi4py._mpiabi._Finder -> _dlopen_libmpi) that raises
+# RuntimeError("cannot load MPI library ...") during ``from mpi4py import MPI``.
+# All three leave this process serial; tests/conftest.py mirrors this import.
 try:
     from mpi4py import MPI
     mpi4py_available = True
-except (ImportError, OSError) as e:
+except (ImportError, OSError, RuntimeError) as e:
     mpi4py_available = False
 
 def plan_task_groups(nworld, ntask, ranks_per_group=0):
