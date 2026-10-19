@@ -731,6 +731,78 @@ class TestScfStabilitySafeguardFailuresAreVisible(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "injected write failure for OQP::DM_A"):
             calc._run_scf()
 
+    def staged_petite(self, calc):
+        calc.mol.symmetry_metadata = {"integral_symmetry": {"status": "active"}}
+        calc.mol.data["OQP::sym_petite_enable"] = np.array([1], dtype=np.int64)
+        calc.mol.data.set_trah_stability(False)
+
+    def assert_temporary_flags_restored(self, calc, petite):
+        # The caller may catch the error and reuse the molecule: it must not
+        # inherit the TRAH stability flag, the TRAH converger, or a petite
+        # flag that the stage switched off.
+        self.assertIs(calc.mol.data.trah_stability, False)
+        self.assertEqual(calc.mol.data.convergers[-1], "diis")
+        np.testing.assert_array_equal(calc.mol.data["OQP::sym_petite_enable"], [petite])
+
+    def test_failed_tag_restore_still_resets_the_temporary_flags(self):
+        calc = self.stability_calculator()
+        self.staged_petite(calc)
+
+        def scf():
+            calc.scf_calls += 1
+            calc.mol.mol_energy.SCF_converged = True
+            calc.mol.mol_energy.energy = -2.0 if calc.scf_calls == 1 else -1.99999999
+            if calc.scf_calls == 2:
+                self.assertIs(calc.mol.data.trah_stability, True)
+                np.testing.assert_array_equal(
+                    calc.mol.data["OQP::sym_petite_enable"], [0])
+                calc.mol.data["OQP::DM_A"] = np.array([99.0, 99.0])
+                calc.mol.data.fail_writes.add("OQP::DM_A")
+
+        calc.scf = scf
+        with self.assertRaisesRegex(RuntimeError, "injected write failure for OQP::DM_A"):
+            calc._run_scf()
+        self.assert_temporary_flags_restored(calc, petite=1)
+
+    def test_failed_trah_stage_still_resets_the_temporary_flags(self):
+        calc = self.stability_calculator()
+        self.staged_petite(calc)
+
+        def scf():
+            calc.scf_calls += 1
+            if calc.scf_calls == 2:
+                raise RuntimeError("injected TRAH failure")
+            calc.mol.mol_energy.SCF_converged = True
+            calc.mol.mol_energy.energy = -2.0
+
+        calc.scf = scf
+        with self.assertRaisesRegex(RuntimeError, "injected TRAH failure"):
+            calc._run_scf()
+        self.assert_temporary_flags_restored(calc, petite=1)
+
+    def test_kept_lower_solution_leaves_petite_off_and_resets_trah_flags(self):
+        calc = self.stability_calculator(trah_lowers=True)
+        self.staged_petite(calc)
+        self.assertTrue(calc._run_scf())
+        self.assertEqual(calc.mol.mol_energy.energy, -2.5)
+        self.assertEqual(calc.mol.symmetry_metadata["integral_symmetry"]["status"],
+                         "disabled_symmetry_broken_scf")
+        self.assert_temporary_flags_restored(calc, petite=0)
+
+    def test_failed_primary_scf_restores_the_primary_converger(self):
+        calc = self.make_calculator()
+
+        def scf():
+            calc.scf_calls += 1
+            if calc.scf_calls == 2:
+                raise RuntimeError("injected escalation failure")
+            calc.mol.mol_energy.SCF_converged = False
+
+        calc.scf = scf
+        with self.assertRaisesRegex(RuntimeError, "injected escalation failure"):
+            calc._run_scf()
+        self.assertEqual(calc.mol.data.convergers, ["diis", "soscf", "diis"])
+
     def test_rhf_snapshot_skips_only_the_unallocated_beta_tags(self):
         calc = self.make_calculator()
         calc.mol.config["scf"]["type"] = "rhf"
