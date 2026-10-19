@@ -811,6 +811,9 @@ void tdhf_umrsf_z_vector(struct oqp_handle_t *inf);
 void tdhf_umrsf_gradient(struct oqp_handle_t *inf);
 void mrsf_xc_sweep_selftest(struct oqp_handle_t *inf, double *error, double *moving_norm);
 void umrsf_bra_reuse_selftest(double *error, int *checks);
+void mrsf_spin_square_selftest(double *error, int *checks);
+void mrsf_spin_square_evaluate(int n, int nc, int mult, const double *mo_a,
+                               const double *mo_b, const double *smat, const double *x, double *ss);
 void tdhf_mrsf_ekt_ip(struct oqp_handle_t *inf);
 void tdhf_mrsf_ekt_ea(struct oqp_handle_t *inf);
 void tdhf_mrsf_z_vector(struct oqp_handle_t *inf);
