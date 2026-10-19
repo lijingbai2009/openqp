@@ -399,7 +399,8 @@ contains
     use int2_compute, only: int2_compute_t
     use tdhf_mrsf_lib, only: mrsf_general_mntoia
     use tdhf_mrsf_lib, only: int2_mrsf_data_t, int2_umrsf_data_t, &
-      mrsf_pair_t,mrsf_pair_allowed,mrsf_pair_setup,mrsf_pair_apply
+      mrsf_pair_t,mrsf_pair_allowed,mrsf_pair_setup,mrsf_pair_apply, &
+      umrsf_pair_allowed,umrsf_pair_setup
     use tdhf_lib, only: sym_response_project, &
       int2_td_data_t
     use tdhf_lib, only: &
@@ -413,7 +414,7 @@ contains
       mrinivec, mrsfcbc, umrsfcbc, mrsfmntoia, umrsfmntoia, mrsfesum, &
       mrsfqroesum, get_mrsf_transitions, &
       get_mrsf_transition_density, get_umrsf_transition_dipole, &
-      get_jacobi, umrsfssqu, mrsf_set_fp32, mrsf_check_block_representation
+      get_jacobi, umrsfssqu, umrsfssq_quintet, mrsfssq, mrsf_set_fp32, mrsf_check_block_representation
     use mathlib, only: orthogonal_transform, orthogonal_transform_sym, &
       unpack_matrix
     use routec_sig, only: routec_sig_available, routec_sig_begin, &
@@ -1000,12 +1001,23 @@ contains
     ! The device session replaces the native sigma build, so it would never use
     ! the cache. A mid-run decline falls back to the full native contraction.
     use_pair=.false.
-    if(.not.use_sig)use_pair=mrsf_pair_allowed(infos,mo_a,mo_b,dft.and.infos%dft%cam_flag,int2_driver%petite)
-    if(use_pair)then
+    if(.not.use_sig)then
+      if(umrsf)then
+        use_pair=umrsf_pair_allowed(infos,mo_a,mo_b,dft.and.infos%dft%cam_flag,int2_driver%petite)
+      else
+        use_pair=mrsf_pair_allowed(infos,mo_a,mo_b,dft.and.infos%dft%cam_flag,int2_driver%petite)
+      end if
+    end if
+    if(use_pair.and.umrsf)then
+      call umrsf_pair_setup(pair_kernel,infos,int2_driver,mo_a,mo_b,scale_exch)
+      write(iw,'(2X,A)') 'UMRSF pair cache: 1 dynamic exchange; quadratic spin-pair matrix'
+    else if(use_pair)then
       call mrsf_pair_setup(pair_kernel,infos,int2_driver,mo_a,scale_exch)
       write(iw,'(2X,A)') 'MRSF pair cache: 1 dynamic exchange; quadratic spin-pair matrix'
     else if(infos%tddft%pair_cache.and.use_sig)then
       write(iw,'(2X,A)') 'MRSF pair cache: not used with the device sigma route'
+    else if(infos%tddft%pair_cache.and.umrsf)then
+      write(iw,'(2X,A)') 'UMRSF pair cache: not applicable to this calculation; standard contraction'
     else if(infos%tddft%pair_cache)then
       write(iw,'(2X,A)') 'MRSF pair cache: not applicable to this calculation; standard contraction'
     end if
@@ -1066,7 +1078,11 @@ contains
         else if (mrst==5) then
 
           call iatogen(bvec_mo(:,ivec), wrk1, noccb, nocca)
-          call orthogonal_transform('t', nbf, mo_a, wrk1, fmrq1(:,:,iv), wrk2)
+          ! Beta-core -> alpha-virtual density. Its reverse transform below
+          ! must use the same two spin-orbital sets; one-MO transforms make
+          ! the unrestricted response nonsymmetric even in a complete space.
+          call dgemm('n','n',nbf,nbf,nbf,1.0_dp,mo_b,nbf,wrk1,nbf,0.0_dp,wrk2,nbf)
+          call dgemm('n','t',nbf,nbf,nbf,1.0_dp,wrk2,nbf,mo_a,nbf,0.0_dp,fmrq1(:,:,iv),nbf)
 
         end if
 
@@ -1077,6 +1093,7 @@ contains
         if (umrsf) then
           call int2_udata_st%clean()
           int2_udata_st%d3 => mrsf_density(:iv,:,:,:)
+          int2_udata_st%general_only = use_pair
           int2_udata_st%tamm_dancoff = tamm_dancoff
           int2_udata_st%scale_exchange = scale_exch
           int2_udata_st%scale_coulomb = scale_exch
@@ -1190,7 +1207,8 @@ contains
 
         else if( mrst==5 )then
 
-          call mntoia(int2_data_q%amb(:,:,iv,1), amo(:,ivec), mo_a, mo_b, noccb, nocca)
+          ! First MO set supplies beta occupieds; second supplies alpha virtuals.
+          call mntoia(int2_data_q%amb(:,:,iv,1), amo(:,ivec), mo_b, mo_a, noccb, nocca)
 
           ! Z(I+,A-)
           call iatogen(bvec_mo(:,ivec),wrk1,noccb,nocca)
@@ -1380,7 +1398,9 @@ contains
                            .true., .false.)
           end do
         else
-          squared_S(:) = 0.0_dp
+          do ist = 1, nstates
+            call mrsfssq(squared_S(ist), bvec_mo(:,ist), nocca, noccb, nbf, .true.)
+          end do
         end if
         call get_mrsf_transitions(trans, nocca, noccb, nbf)
         write(*,'(/,2x,35("="),/,2x,&
@@ -1402,14 +1422,23 @@ contains
                            .false., .true.)
           end do
         else
-          squared_S(:) = 2.0_dp
+          do ist = 1, nstates
+            call mrsfssq(squared_S(ist), bvec_mo(:,ist), nocca, noccb, nbf, .false.)
+          end do
         end if
         call get_mrsf_transitions(trans, nocca, noccb, nbf)
         write(*,'(/,2x,35("="),/,2x,&
             &"Spin-adapted spin-flip excitations",/,2x,35("="))')
       case(5)
         call get_transition_density(trden, bvec_mo, nbf, noccb, nocca, nstates)
-        squared_S(:) = 6.0_dp
+        if (umrsf) then
+          do ist = 1, nstates
+            call umrsfssq_quintet(squared_S(ist),mo_a,mo_b,smat,wrk1,nbf,nbf, &
+                                  bvec_mo,nocca,noccb,ist)
+          end do
+        else
+          squared_S(:) = 6.0_dp
+        end if
         call get_transitions(trans, noccb, nocca, nbf)
         write(*,'(/,2x,35("="),/,2x,&
             &"Beta -> Alpha spin-flip excitations",/,2x,35("="))')
