@@ -559,8 +559,13 @@ def test_unpruned_dft_grid_has_one_readable_canonical_spelling(spelling):
     rendered = oqp_input.render_canonical_oqp(spec)
     assert rendered == 'rks/pbe/6-31g dftgrid(pruned=none)\ngeom="h2o.xyz"\n'
     assert oqp_input.lower_to_legacy(spec)["dftgrid"]["pruned"] == "none"
-    # SG2 is the default and disappears; other presets are kept as written.
+    # The default is pruned=auto and disappears.  An explicit preset is kept
+    # as written: SG2 is what auto selects only while rad_npts/ang_npts keep
+    # their defaults, so an explicit SG2 is not a restatement of the default.
     assert "dftgrid" not in oqp_input.render_canonical_oqp(
+        oqp_input.parse_canonical_oqp('rks/pbe/6-31g geom="h2o.xyz" dftgrid(pruned=auto)')
+    )
+    assert "dftgrid(pruned=SG2)" in oqp_input.render_canonical_oqp(
         oqp_input.parse_canonical_oqp('rks/pbe/6-31g geom="h2o.xyz" dftgrid(pruned=SG2)')
     )
     assert "dftgrid(pruned=sg1)" in oqp_input.render_canonical_oqp(
@@ -2786,7 +2791,7 @@ def test_minimal_namd_uses_directional_stable_defaults_and_file_velocities():
     for key, value in expected.items():
         assert values['md', key] == value
     assert values['md', 'thrshe'] == 0.367493
-    assert values['dftgrid', 'pruned'] == 'sg2'
+    assert values['dftgrid', 'pruned'] == 'auto'
     assert values['scf', 'conv'] == values['tdhf', 'conv'] == 1e-8
 
 
