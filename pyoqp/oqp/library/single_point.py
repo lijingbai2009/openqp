@@ -976,13 +976,13 @@ class SinglePoint(Calculator):
             mult = int(cfg.get('scf', {}).get('multiplicity', 1))
         except (TypeError, ValueError):
             mult = 1
-        try:
-            z = self.mol.get_atoms()
-            tm = bool(((z >= 21) & (z <= 30)).any() or ((z >= 39) & (z <= 48)).any()
-                      or ((z >= 57) & (z <= 80)).any())
-            natom = int(len(z))
-        except Exception:
-            tm, natom = False, 0
+        # No fallback: a molecule without atoms cannot reach the SCF, and a
+        # silent (tm=False, natom=0) answer would steer the converger choice
+        # for the hard transition-metal class without any trace in the log.
+        z = self.mol.get_atoms()
+        tm = bool(((z >= 21) & (z <= 30)).any() or ((z >= 39) & (z <= 48)).any()
+                  or ((z >= 57) & (z <= 80)).any())
+        natom = int(len(z))
         try:
             charge = int(cfg.get('input', {}).get('charge', 0))
         except (TypeError, ValueError):
@@ -1010,12 +1010,18 @@ class SinglePoint(Calculator):
         primary = 'diis'   # C-DIIS: best default
 
         if mode == 'ml':
+            # Only the absence of the optional distilled model selects the
+            # rule fallback. A model that is present but fails to import or
+            # to predict is a defect and must stop the run.
             try:
                 from oqp.library.scf_selector_model import predict as _ml_predict  # distilled, optional
+            except ModuleNotFoundError as exc:
+                if exc.name != 'oqp.library.scf_selector_model':
+                    raise
+                used = 'ML(no model -> rules)'
+            else:
                 primary = _ml_predict(f)
                 used = 'ML-model'
-            except Exception:
-                used = 'ML(no model -> rules)'
 
         # Stability following is opt-in: it runs only when the user sets
         # scf.stability in the input. The SCF manager never enables it on its
@@ -1103,138 +1109,153 @@ class SinglePoint(Calculator):
                 primary = 'diis'
         primary = self._apply_selected_converger(primary)
 
-        # --- Stage 1: primary converger ---
-        data.set_scf_converger_type(primary)
-        self.scf()
-        converged = self.mol.mol_energy.SCF_converged
-        if converged:
-            dump_log(self.mol, title='PyOQP: SCF converged with %s' % primary, section='')
-
-        # --- Stage 2: escalate the converger on non-convergence ---
-        # Escalation ladder of progressively more robust (and costlier) methods.
-        # Default: SOSCF (cheap second-order, fixes most DIIS stalls) BEFORE TRAH
-        # (globally convergent trust region). 'scf.escalation' overrides the
-        # comma-separated chain; 'scf.alternative_scf' (back-compat) sets the
-        # final method. Each stage warm-starts from the previous orbitals.
-        escalation = scf_config.get('escalation', None)
-        if escalation:
-            chain = [c.strip().lower() for c in str(escalation).split(',') if c.strip()]
-        else:
-            chain = ['soscf']
-            if fallback:
-                chain.append(fallback)
-        # Drop the primary and de-duplicate while preserving order.
-        _seen = set()
-        chain = [c for c in chain if c != primary and not (c in _seen or _seen.add(c))]
-        # Keep the occupation-preserving recovery stages, but never enter TRAH
-        # for a MOM/rstctmo calculation (see occupation_constrained above).
-        if occupation_constrained and 'trah' in chain:
-            chain = [c for c in chain if c != 'trah']
-            dump_log(
-                self.mol,
-                title='PyOQP: TRAH recovery disabled because scf.mom/rstctmo=true; '
-                      'TRAH cannot preserve the requested orbital occupation',
-                section='input',
-            )
-        for conv in chain:
-            if converged:
-                break
-            dump_log(self.mol,
-                     title='PyOQP: SCF not converged; escalating to %s' % conv,
-                     section='input')
-            data.set_scf_converger_type(conv)
-            data.set_sd_scf(False)
+        # Every stage below changes the native converger; whatever happens,
+        # including an error, later reference() calls get the primary back.
+        try:
+            # --- Stage 1: primary converger ---
+            data.set_scf_converger_type(primary)
             self.scf()
             converged = self.mol.mol_energy.SCF_converged
+            if converged:
+                dump_log(self.mol, title='PyOQP: SCF converged with %s' % primary, section='')
 
-        # --- Stage 3: stability safeguard ---
-        # Applied only when the user opts in with [scf] stability=true.  Covers
-        # ground-state targets (method='hf', and the coupled-cluster methods
-        # that build on the same ground-state determinant) and spin-flip
-        # excited-state reference SCFs (method='tdhf' with type sf/mrsf/umrsf).
-        # CCSD and CCSD(T) belong with 'hf' here: they correlate the converged
-        # reference, so an unstable UHF/ROHF determinant is exactly as wrong a
-        # starting point for them as it is for the HF energy itself, and
-        # silently ignoring the option the user asked for is the worst of the
-        # available behaviours.  A
-        # DIIS-converged but *unstable* open-shell solution is just as wrong a
-        # reference for spin-flip TDHF/MRSF as it is a wrong ground state:
-        # building MRSF on it makes the reference (and the excited states)
-        # disagree with the standalone SCF along a PES.  Do not apply this to
-        # ordinary closed-shell TDHF/TDA/RPA references.  The safeguard only
-        # KEEPS the relaxed orbitals when TRAH finds a genuinely lower solution
-        # (e_post < e_pre); an energy-invariant re-canonicalization (no lowering)
-        # is reverted below by restoring the snapshot.
-        td_type = str(getattr(self, 'td', '')).lower()
-        spin_flip_reference = self.method == 'tdhf' and td_type in ('sf', 'mrsf', 'umrsf')
-        ground_state_target = self.method in ('hf', 'ccsd', 'ccsd(t)')
-        if (converged and stability and not occupation_constrained and primary != 'trah'
-                and (ground_state_target or spin_flip_reference)):
-            e_pre = self.mol.mol_energy.energy
-            mol_energy_snapshot = self._snapshot_mol_energy_state()
-            # Snapshot the converged orbitals so the safeguard is a true no-op
-            # at a stable minimum (TRAH may re-canonicalize/rotate orbitals
-            # energy-invariantly, which would otherwise perturb sensitive
-            # downstream quantities such as range-separated excited gradients).
-            snapshot = self._snapshot_scf_state()
-            dump_log(self.mol, title='PyOQP: Verifying SCF stability (TRAH)', section='input')
-
-            # Stability-following explores symmetry-breaking rotations whose
-            # densities are not totally symmetric, so the petite-list
-            # reduction must be off during (and after, if a broken-symmetry
-            # solution is kept) this stage.
-            petite_staged = self._petite_is_staged()
-            if petite_staged:
-                self._set_petite_enabled(False)
-
-            data.set_scf_converger_type('trah')
-            data.set_trah_stability(True)
-            data.set_sd_scf(False)
-            self.scf()
-            trah_ok = self.mol.mol_energy.SCF_converged
-            e_post = self.mol.mol_energy.energy
-
-            if trah_ok and e_post < e_pre - 1.0e-7:
-                # The converged point was unstable: keep the lower solution.
-                # The kept density may be symmetry-broken: petite stays off.
-                if petite_staged:
-                    self.mol.symmetry_metadata['integral_symmetry']['status'] = \
-                        'disabled_symmetry_broken_scf'
-                dump_log(self.mol,
-                         title='PyOQP: SCF point was unstable; relaxed to a lower '
-                               'solution (dE = %.3e Hartree)' % (e_post - e_pre),
-                         section='')
+            # --- Stage 2: escalate the converger on non-convergence ---
+            # Escalation ladder of progressively more robust (and costlier) methods.
+            # Default: SOSCF (cheap second-order, fixes most DIIS stalls) BEFORE TRAH
+            # (globally convergent trust region). 'scf.escalation' overrides the
+            # comma-separated chain; 'scf.alternative_scf' (back-compat) sets the
+            # final method. Each stage warm-starts from the previous orbitals.
+            escalation = scf_config.get('escalation', None)
+            if escalation:
+                chain = [c.strip().lower() for c in str(escalation).split(',') if c.strip()]
             else:
-                # Stable (no lower solution found) or the verification did not
-                # converge: restore the original converged orbitals unchanged.
-                self._restore_scf_state(snapshot)
-                for attr, value in mol_energy_snapshot.items():
-                    try:
-                        setattr(self.mol.mol_energy, attr, value)
-                    except Exception:
-                        pass
-                # Symmetric solution kept: the petite reduction is valid again.
-                if petite_staged:
-                    self._set_petite_enabled(True)
-                if not trah_ok:
-                    # Re-run the primary converger (warm-started) so mol_energy
-                    # is consistent with the restored orbitals.
-                    data.set_scf_converger_type(primary)
+                chain = ['soscf']
+                if fallback:
+                    chain.append(fallback)
+            # Drop the primary and de-duplicate while preserving order.
+            _seen = set()
+            chain = [c for c in chain if c != primary and not (c in _seen or _seen.add(c))]
+            # Keep the occupation-preserving recovery stages, but never enter TRAH
+            # for a MOM/rstctmo calculation (see occupation_constrained above).
+            if occupation_constrained and 'trah' in chain:
+                chain = [c for c in chain if c != 'trah']
+                dump_log(
+                    self.mol,
+                    title='PyOQP: TRAH recovery disabled because scf.mom/rstctmo=true; '
+                          'TRAH cannot preserve the requested orbital occupation',
+                    section='input',
+                )
+            for conv in chain:
+                if converged:
+                    break
+                dump_log(self.mol,
+                         title='PyOQP: SCF not converged; escalating to %s' % conv,
+                         section='input')
+                data.set_scf_converger_type(conv)
+                data.set_sd_scf(False)
+                self.scf()
+                converged = self.mol.mol_energy.SCF_converged
+
+            # --- Stage 3: stability safeguard ---
+            # Applied only when the user opts in with [scf] stability=true.  Covers
+            # ground-state targets (method='hf', and the coupled-cluster methods
+            # that build on the same ground-state determinant) and spin-flip
+            # excited-state reference SCFs (method='tdhf' with type sf/mrsf/umrsf).
+            # CCSD and CCSD(T) belong with 'hf' here: they correlate the converged
+            # reference, so an unstable UHF/ROHF determinant is exactly as wrong a
+            # starting point for them as it is for the HF energy itself, and
+            # silently ignoring the option the user asked for is the worst of the
+            # available behaviours.  A
+            # DIIS-converged but *unstable* open-shell solution is just as wrong a
+            # reference for spin-flip TDHF/MRSF as it is a wrong ground state:
+            # building MRSF on it makes the reference (and the excited states)
+            # disagree with the standalone SCF along a PES.  Do not apply this to
+            # ordinary closed-shell TDHF/TDA/RPA references.  The safeguard only
+            # KEEPS the relaxed orbitals when TRAH finds a genuinely lower solution
+            # (e_post < e_pre); an energy-invariant re-canonicalization (no lowering)
+            # is reverted below by restoring the snapshot.
+            td_type = str(getattr(self, 'td', '')).lower()
+            spin_flip_reference = self.method == 'tdhf' and td_type in ('sf', 'mrsf', 'umrsf')
+            ground_state_target = self.method in ('hf', 'ccsd', 'ccsd(t)')
+            if (converged and stability and not occupation_constrained and primary != 'trah'
+                    and (ground_state_target or spin_flip_reference)):
+                e_pre = self.mol.mol_energy.energy
+                mol_energy_snapshot = self._snapshot_mol_energy_state()
+                # Snapshot the converged orbitals so the safeguard is a true no-op
+                # at a stable minimum (TRAH may re-canonicalize/rotate orbitals
+                # energy-invariantly, which would otherwise perturb sensitive
+                # downstream quantities such as range-separated excited gradients).
+                snapshot = self._snapshot_scf_state()
+                dump_log(self.mol, title='PyOQP: Verifying SCF stability (TRAH)', section='input')
+
+                # Stability-following explores symmetry-breaking rotations whose
+                # densities are not totally symmetric, so the petite-list
+                # reduction must be off during (and after, if a broken-symmetry
+                # solution is kept) this stage.
+                petite_staged = self._petite_is_staged()
+                # The TRAH stage mutates the stability flag, the converger and
+                # (when staged) the petite flag.  Every exit -- including an error
+                # raised by a tag write -- must hand the molecule back with those
+                # restored; the error itself still propagates.  The petite flag
+                # stays off only when a lower, possibly symmetry-broken solution
+                # is actually kept.
+                petite_off = False
+                kept_broken_symmetry = False
+                try:
+                    if petite_staged:
+                        self._set_petite_enabled(False)
+                        petite_off = True
+
+                    data.set_scf_converger_type('trah')
+                    data.set_trah_stability(True)
+                    data.set_sd_scf(False)
                     self.scf()
-                    converged = self.mol.mol_energy.SCF_converged
+                    trah_ok = self.mol.mol_energy.SCF_converged
+                    e_post = self.mol.mol_energy.energy
 
-            # restore the user-configured stability flag for later SCF calls
-            data.set_trah_stability(trah_stab_default)
-
-        # restore the primary converger for any subsequent reference() calls
-        data.set_scf_converger_type(primary)
+                    if trah_ok and e_post < e_pre - 1.0e-7:
+                        # The converged point was unstable: keep the lower solution.
+                        # The kept density may be symmetry-broken: petite stays off.
+                        if petite_staged:
+                            kept_broken_symmetry = True
+                            self.mol.symmetry_metadata['integral_symmetry']['status'] = \
+                                'disabled_symmetry_broken_scf'
+                        dump_log(self.mol,
+                                 title='PyOQP: SCF point was unstable; relaxed to a lower '
+                                       'solution (dE = %.3e Hartree)' % (e_post - e_pre),
+                                 section='')
+                    else:
+                        # Stable (no lower solution found) or the verification did not
+                        # converge: restore the original converged orbitals unchanged.
+                        self._restore_scf_state(snapshot)
+                        self._restore_mol_energy_state(mol_energy_snapshot)
+                        # Symmetric solution kept: the petite reduction is valid again.
+                        if petite_off:
+                            self._set_petite_enabled(True)
+                            petite_off = False
+                        if not trah_ok:
+                            # Re-run the primary converger (warm-started) so mol_energy
+                            # is consistent with the restored orbitals.
+                            data.set_scf_converger_type(primary)
+                            self.scf()
+                            converged = self.mol.mol_energy.SCF_converged
+                finally:
+                    # restore the user-configured stability flag for later SCF calls
+                    data.set_trah_stability(trah_stab_default)
+                    if petite_off and not kept_broken_symmetry:
+                        self._set_petite_enabled(True)
+        finally:
+            # restore the primary converger for any subsequent reference() calls
+            data.set_scf_converger_type(primary)
         return converged
 
     # Wavefunction tags that define an SCF solution (alpha + beta channels).
-    _scf_state_tags = (
-        'OQP::VEC_MO_A', 'OQP::E_MO_A', 'OQP::DM_A', 'OQP::FOCK_A',
+    _scf_beta_state_tags = (
         'OQP::VEC_MO_B', 'OQP::E_MO_B', 'OQP::DM_B', 'OQP::FOCK_B',
     )
+    _scf_state_tags = (
+        'OQP::VEC_MO_A', 'OQP::E_MO_A', 'OQP::DM_A', 'OQP::FOCK_A',
+    ) + _scf_beta_state_tags
 
     def _petite_is_staged(self):
         """True when both metadata and the live native flag are active.
@@ -1247,38 +1268,55 @@ class SinglePoint(Calculator):
         if (not meta or
                 meta.get('integral_symmetry', {}).get('status') != 'active'):
             return False
+        # OQPData raises AttributeError for a tag that is not allocated, and
+        # the native consumers treat an absent flag exactly as 0.  Any other
+        # error (an unreadable or malformed flag) propagates: answering False
+        # would keep the petite reduction on during the symmetry-breaking
+        # TRAH stage.
         try:
-            flag = np.asarray(
-                self.mol.data['OQP::sym_petite_enable']).ravel()
-            return bool(flag.size and int(flag[0]) != 0)
-        except Exception:
+            raw = self.mol.data['OQP::sym_petite_enable']
+        except AttributeError:
             return False
+        flag = np.asarray(raw).ravel()
+        return bool(flag.size and int(flag[0]) != 0)
 
     def _set_petite_enabled(self, enabled):
-        import numpy as np
-        try:
-            self.mol.data['OQP::sym_petite_enable'] = \
-                np.array([1 if enabled else 0], dtype=np.int64)
-        except Exception:
-            pass
+        # No fallback: if the flag cannot be written, TRAH would run with the
+        # petite-list reduction on symmetry-broken densities.
+        self.mol.data['OQP::sym_petite_enable'] = \
+            np.array([1 if enabled else 0], dtype=np.int64)
 
     def _snapshot_scf_state(self):
-        """Deep-copy the tags that define the current converged SCF solution."""
+        """Deep-copy the tags that define the current converged SCF solution.
+
+        Every alpha tag is required.  The beta tags are required for UHF and
+        ROHF; an RHF run never allocates them (scf.F90 reserves ``tags_beta``
+        only for scftype >= 2), so for RHF their absence -- AttributeError
+        from OQPData -- is the one expected case.  Any other error stops the
+        safeguard instead of leaving a tag out of the snapshot, which would
+        make a later restore silently keep the TRAH value for that tag.
+        """
+        scf_type = str(self.mol.config.get('scf', {}).get('type', 'rhf')).lower()
+        beta_optional = scf_type == 'rhf'
         snap = {}
         for tag in self._scf_state_tags:
             try:
-                snap[tag] = np.array(self.mol.data[tag]).copy()
-            except Exception:
-                pass
+                value = self.mol.data[tag]
+            except AttributeError:
+                if beta_optional and tag in self._scf_beta_state_tags:
+                    continue
+                raise
+            snap[tag] = np.array(value).copy()
         return snap
 
     def _restore_scf_state(self, snap):
-        """Write a previously captured SCF solution back into the molecule."""
+        """Write a previously captured SCF solution back into the molecule.
+
+        A write that fails must stop the run: continuing would leave a mixture
+        of TRAH and pre-TRAH tags paired with the pre-TRAH energy.
+        """
         for tag, value in snap.items():
-            try:
-                self.mol.data[tag] = value
-            except Exception:
-                pass
+            self.mol.data[tag] = value
 
     _mol_energy_state_attrs = (
         'energy',
@@ -1289,18 +1327,16 @@ class SinglePoint(Calculator):
     def _snapshot_mol_energy_state(self):
         """Capture scalar energy/convergence metadata that must match SCF tags."""
         mol_energy = self.mol.mol_energy
-        snap = {}
-        try:
-            snap.update(getattr(mol_energy, '__dict__', {}))
-        except Exception:
-            pass
+        snap = dict(getattr(mol_energy, '__dict__', {}))
         for attr in self._mol_energy_state_attrs:
             if attr not in snap and hasattr(mol_energy, attr):
-                try:
-                    snap[attr] = getattr(mol_energy, attr)
-                except Exception:
-                    pass
+                snap[attr] = getattr(mol_energy, attr)
         return snap
+
+    def _restore_mol_energy_state(self, snap):
+        """Write captured energy/convergence metadata back; failures propagate."""
+        for attr, value in snap.items():
+            setattr(self.mol.mol_energy, attr, value)
 
     def excitation(self, ref_energy):
         if is_tb_method(self.method):
