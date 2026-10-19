@@ -15,6 +15,14 @@ atomic accumulator off and on, serially and with four OpenMP threads.
   final alpha/beta Fock matrices to 1e-9.
 * The serial replicated energy is pinned to unmodified main (84f324bf8,
   before the guard), so a dropped or doubled J or K term fails.
+
+Every run is repeated with OQP_INT2_LAYOUT=legacy (quartets digested by
+*_update) and OQP_INT2_LAYOUT=shell (every quartet digested by
+*_consume_shell).  That the shell override selects shell blocks for these
+consumers is asserted by the production layout resolution in
+tests/fortran/int2_shell_block_selftest.F90 (test_int2_shell_blocks.py),
+which also pins both consume_shell guards on non-symmetric data by
+linearity, F(cJ,cK) = F(cJ,0) + F(0,cK).
 """
 import json
 import os
@@ -62,12 +70,13 @@ CASES = {
 }
 
 
-def _run(tmp_path, case, atomic, threads):
+def _run(tmp_path, case, layout, atomic, threads):
     system, scf, mult, functional, _ = CASES[case]
-    work = tmp_path / f'{case}-a{atomic}-t{threads}'
+    work = tmp_path / f'{case}-{layout}-a{atomic}-t{threads}'
     work.mkdir()
     env = {k: v for k, v in os.environ.items() if not k.startswith('OQP_')}
     env.update(OMP_NUM_THREADS=str(threads), OQP_FOCK_ATOMIC=str(atomic),
+               OQP_INT2_LAYOUT=layout,
                OPENBLAS_NUM_THREADS='1', MKL_NUM_THREADS='1',
                VECLIB_MAXIMUM_THREADS='1')
     proc = subprocess.run([sys.executable, '-c', CHILD, system, scf, mult, functional],
@@ -79,14 +88,15 @@ def _run(tmp_path, case, atomic, threads):
         text += log.read_text(errors='replace')
     assert proc.returncode == 0, text[-4000:]
     banner = 'Fock accumulator: shared+atomic' in text
-    assert banner == bool(atomic), f'{case} atomic={atomic} threads={threads}: wrong accumulator'
+    assert banner == bool(atomic), f'{case} {layout} atomic={atomic} threads={threads}: wrong accumulator'
     line = [x for x in proc.stdout.splitlines() if x.startswith('RESULT ')][-1]
     return json.loads(line[len('RESULT '):])
 
 
+@pytest.mark.parametrize('layout', ['legacy', 'shell'])
 @pytest.mark.parametrize('case', sorted(CASES))
-def test_zero_scale_guard_matches_across_accumulators_and_threads(tmp_path, case):
-    reference = _run(tmp_path, case, 0, 1)
+def test_zero_scale_guard_matches_across_accumulators_and_threads(tmp_path, case, layout):
+    reference = _run(tmp_path, case, layout, 0, 1)
     assert np.isfinite(reference['energy'])
     pinned = CASES[case][4]
     if pinned is not None:
@@ -100,9 +110,9 @@ def test_zero_scale_guard_matches_across_accumulators_and_threads(tmp_path, case
     # level (unmodified main: 3e-7 to 2e-6 for UKS OH at conv=1e-9), so only
     # the energy is compared there.
     for atomic, threads, fock_tol in [(1, 1, 1e-9), (0, 4, None), (1, 4, None)]:
-        result = _run(tmp_path, case, atomic, threads)
-        assert abs(result['energy'] - reference['energy']) <= 1e-9, (atomic, threads)
+        result = _run(tmp_path, case, layout, atomic, threads)
+        assert abs(result['energy'] - reference['energy']) <= 1e-9, (layout, atomic, threads)
         for key in ('fock_a', 'fock_b'):
             if fock_tol is not None and key in reference:
                 diff = np.max(np.abs(np.asarray(result[key]) - np.asarray(reference[key])))
-                assert diff <= fock_tol, (key, atomic, threads, diff)
+                assert diff <= fock_tol, (key, layout, atomic, threads, diff)
