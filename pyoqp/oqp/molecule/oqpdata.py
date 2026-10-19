@@ -447,7 +447,9 @@ OQP_CONFIG_SCHEMA = {
         'rad_npts': {'type': int, 'default': '96'},
         'ang_npts': {'type': int, 'default': '302'},
         'partfun': {'type': string, 'default': 'ssf'},
-        'pruned': {'type': string, 'default': 'SG2'},
+        # 'auto' resolves in resolve_dftgrid_pruned(): SG2 while rad_npts and
+        # ang_npts keep their defaults, else the unpruned rad_npts x ang_npts grid.
+        'pruned': {'type': string, 'default': 'auto'},
         'grid_ao_pruned': {'type': bool, 'default': 'True'},
         'grid_ao_threshold': {'type': float, 'default': '1.0e-15'},
         'grid_ao_sparsity_ratio': {'type': float, 'default': '0.9'},
@@ -945,6 +947,39 @@ OQP_CONFIG_SCHEMA = {
         'exception': {'type': bool, 'default': False},
     },
 }
+
+# Pruned DFT grid presets understood by dft_set_options (source/dftlib/dft.F90).
+DFTGRID_PRESETS = ('SG0', 'SG1', 'SG2', 'SG3')
+# Preset that pruned=auto selects when the grid size is left at its default.
+DFTGRID_AUTO_PRESET = 'SG2'
+# Spellings of the unpruned rad_npts x ang_npts grid.
+DFTGRID_UNPRUNED_SPELLINGS = frozenset({'', 'none', 'off', 'false', 'no'})
+
+
+def resolve_dftgrid_pruned(dftgrid):
+    """Return the grid that a [dftgrid] section selects: a preset name or 'none'.
+
+    A pruned preset (SG0-SG3) defines its own radial and angular grids, so
+    dft_set_options never reads rad_npts / ang_npts for the atoms it covers.
+    With a fixed preset default, an input that set only rad_npts / ang_npts was
+    therefore silently run on the preset grid.  The default is now ``auto``:
+    the SG2 preset while rad_npts and ang_npts keep their schema defaults, and
+    the unpruned rad_npts x ang_npts grid as soon as either is changed.  An
+    explicit preset or an explicit unpruned spelling is returned unchanged.
+    """
+    raw = dftgrid.get('pruned', 'auto')
+    value = '' if raw is None else str(raw).strip()
+    if value.lower() in DFTGRID_UNPRUNED_SPELLINGS:
+        return 'none'
+    if value.lower() != 'auto':
+        return value.upper()
+    schema = OQP_CONFIG_SCHEMA['dftgrid']
+    sizes_are_default = all(
+        int(dftgrid.get(key, schema[key]['default'])) == int(schema[key]['default'])
+        for key in ('rad_npts', 'ang_npts')
+    )
+    return DFTGRID_AUTO_PRESET if sizes_are_default else 'none'
+
 
 TA_DIMENSIONS_LENGTH = 12
 
@@ -1850,16 +1885,24 @@ class OQPData:
         self._data.dft.dft_partfun = OQPData._dftgrid_partition_functions[partfun]
 
     def set_dftgrid_pruned(self, pruned):
-        """Set pruned grid"""
-        pruned_list = ['SG0', 'SG1', 'SG2', 'SG3']
+        """Set the pruned grid preset, or the unpruned rad_npts x ang_npts grid.
+
+        ``pruned`` must already be resolved by resolve_dftgrid_pruned();
+        apply_config does that, because ``auto`` depends on rad_npts/ang_npts.
+        """
         # "", none, off, false, no: use the unpruned (rad_npts x ang_npts) grid.
-        if pruned.strip().lower() not in ("", "none", "off", "false", "no"):
-            pruned = pruned.upper()
-            if pruned in pruned_list:
-                self._data.dft.grid_pruned = True
-                self._data.dft.grid_pruned_name = pruned.ljust(16)[:16].upper().encode("ascii")
-            else:
-                print(f"{pruned} grid is not valid. Available options are: {', '.join(pruned_list)}")
+        if pruned.strip().lower() in DFTGRID_UNPRUNED_SPELLINGS:
+            # Reset explicitly: a Molecule that is re-configured (MD, NAMD,
+            # API set()) must not keep the preset of an earlier configuration.
+            self._data.dft.grid_pruned = False
+            self._data.dft.grid_pruned_name = b"".ljust(16)
+            return
+        pruned = pruned.upper()
+        if pruned in DFTGRID_PRESETS:
+            self._data.dft.grid_pruned = True
+            self._data.dft.grid_pruned_name = pruned.ljust(16)[:16].upper().encode("ascii")
+        else:
+            print(f"{pruned} grid is not valid. Available options are: {', '.join(DFTGRID_PRESETS)}")
 
     def set_dftgrid_hfscale(self, hfscale):
         """Set HF exact exchange scalar in DFT calculation"""
@@ -1918,6 +1961,10 @@ class OQPData:
         The latter has to be read from the input file
         """
         lib.oqp_set_harmonic_active(ispher_mode(config['input'].get('ispher', 'auto')) != 'false')
+        if 'dftgrid' in config:
+            # Record the grid that will actually run, so the native setter, the
+            # printed/saved configuration and every later reader agree.
+            config['dftgrid']['pruned'] = resolve_dftgrid_pruned(config['dftgrid'])
         for section in config:
             self.parse_section(config, section)
 
