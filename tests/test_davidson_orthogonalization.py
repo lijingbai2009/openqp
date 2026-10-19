@@ -17,7 +17,7 @@ def test_native_davidson_candidate_scaling_and_dependence():
     check(ctypes.byref(error), ctypes.byref(checks), ctypes.byref(failures))
     print(f"DAVIDSON_ORTHOGONALIZATION cases={checks.value} "
           f"failures={failures.value} max_abs={error.value:.16g}")
-    assert checks.value == 60
+    assert checks.value == 61
     assert failures.value == 0
     assert 0 <= error.value <= 1e-12
 
