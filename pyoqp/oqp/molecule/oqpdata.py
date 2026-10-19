@@ -1194,20 +1194,20 @@ class OQPData:
     def __setitem__(self, key, value):
         """Set data in molecule"""
 
-        if key in dir(self._data.mol_prop):
-            self._data.mol_prop[key] = value
-
-        if key in dir(self._data.mol_energy):
-            self._data.mol_energy[key] = value
-
-        if key in dir(self._data.mpiinfo):
-            setattr(self._data.mpiinfo, key, value)
-
-        if key in dir(self._data.tddft):
-            setattr(self._data.tddft, key, value)
-
-        if key in dir(self._data.elshell):
-            setattr(self._data.elshell, key, value)
+        # A key naming a member of a native parameter struct is written to
+        # that member (to every struct that has it, e.g. ``debug_mode`` in
+        # tddft and mpiinfo) and is NOT also stored as a tag: the value is
+        # then a struct scalar such as a bool, which tagarray cannot store,
+        # and the tag would be unreadable anyway because __getitem__ resolves
+        # struct members first.
+        assigned = False
+        for struct in (self._data.mol_prop, self._data.mol_energy,
+                       self._data.mpiinfo, self._data.tddft,
+                       self._data.elshell):
+            if key in dir(struct):
+                setattr(struct, key, value)
+                assigned = True
+        if assigned:
             return
 
         if isinstance(value, np.ndarray):
@@ -1246,6 +1246,10 @@ class OQPData:
         data_size = lib.oqp_alloc(self._data, req, type_id, ndims, dims, data_ptr)
         if data_size == -1:
             raise RuntimeError(f"Cannot store OQP data tag `{key}`: handle not initialized")
+        if data_size == -3:
+            raise ValueError(
+                f"Cannot store OQP data tag `{key}`: tagarray refused to create "
+                "the record (invalid tag or record conflict)")
         if data_size < 0:
             raise MemoryError(
                 f"Cannot allocate OQP data tag `{key}` with shape {shape} "

@@ -76,3 +76,41 @@ def test_failed_native_alloc_propagates(data, monkeypatch, status, exc):
     # The failed write left the previous contents in place; the caller saw
     # an exception instead of silently continuing with them.
     np.testing.assert_array_equal(np.asarray(data[key]), [1.0, 2.0])
+
+
+def _tag_status(data, key):
+    """Raw ``oqp_get`` return for ``key``: >= 0 when a tag record exists."""
+    from oqp import ffi, lib
+    from oqp.molecule.oqpdata import TA_DIMENSIONS_LENGTH
+
+    return lib.oqp_get(data._data, ffi.new('char []', bytes(key, 'ascii')),
+                       ffi.new('int32_t *'), ffi.new('int32_t *'),
+                       ffi.new(f'int64_t[{TA_DIMENSIONS_LENGTH}]'),
+                       ffi.new('void **'))
+
+
+@pytest.mark.parametrize("key, value, structs", [
+    ("tda", True, ("tddft",)),
+    ("debug_mode", True, ("tddft", "mpiinfo")),
+    ("usempi", False, ("mpiinfo",)),
+    ("charge", -1, ("mol_prop",)),
+])
+def test_struct_member_write_is_not_stored_as_tag(data, key, value, structs):
+    # A struct member (a bool here, which tagarray cannot store) is written to
+    # every native struct that has it and the call returns; it must neither
+    # raise after the member changed nor leave a stray tag of the same name.
+    data[key] = value
+    for name in structs:
+        assert getattr(getattr(data._data, name), key) == value
+    assert data[key] == value
+    assert _tag_status(data, key) < 0
+
+
+def test_refused_native_create_raises_before_copy(data):
+    # tagarray rejects a tag containing a control character.  oqp_alloc must
+    # report that refusal itself (-3) rather than look the tag up afterwards.
+    key = "OQP::PROBE\x01REFUSED"
+    with pytest.raises(ValueError) as err:
+        data[key] = np.array([1.0, 2.0, 3.0])
+    assert "refused" in str(err.value)
+    assert _tag_status(data, key) < 0
