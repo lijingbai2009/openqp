@@ -64,22 +64,26 @@ class _MissingLibmpiFinder:
     ``MPI4PY_LIBMPI=/nonexistent/libmpi.dylib``).
     """
 
-    def __init__(self, error):
+    def __init__(self, error, message):
         self.error = error
+        self.message = message
 
     def find_spec(self, fullname, path, target=None):
         if fullname == "mpi4py.MPI":
-            raise self.error("cannot load MPI library\ndlopen(libmpi.dylib): no such file")
+            raise self.error(self.message)
         return None
 
 
-def _install_failing_mpi4py(monkeypatch, error):
+_NO_LIBMPI = "cannot load MPI library\ndlopen(libmpi.dylib): no such file"
+
+
+def _install_failing_mpi4py(monkeypatch, error, message=_NO_LIBMPI):
     """Make ``from mpi4py import MPI`` raise ``error``; monkeypatch restores it."""
     package = types.ModuleType("mpi4py")
     package.__path__ = []
     monkeypatch.setitem(sys.modules, "mpi4py", package)
     monkeypatch.delitem(sys.modules, "mpi4py.MPI", raising=False)
-    monkeypatch.setattr(sys, "meta_path", [_MissingLibmpiFinder(error)] + sys.meta_path)
+    monkeypatch.setattr(sys, "meta_path", [_MissingLibmpiFinder(error, message)] + sys.meta_path)
 
 
 _NO_MPI_ERRORS = [ImportError, OSError, RuntimeError]
@@ -108,10 +112,37 @@ def test_mpi_utils_runs_serial_when_mpi_is_missing(monkeypatch, error):
     assert module.mpi4py_available is False
 
 
+# RuntimeErrors that mpi4py raises only after libmpi has loaded: they mean a
+# broken MPI, not an absent one, and must not turn an mpiexec rank serial.
+_MPI_FAILURES_AFTER_LOAD = [
+    "MPI_Abi_get_version [ierr=1]",
+    "MPI_Init_thread failed: error code 15",
+]
+
+
+@pytest.mark.parametrize("message", _MPI_FAILURES_AFTER_LOAD)
+def test_probe_propagates_other_mpi_runtime_errors(monkeypatch, message):
+    _install_failing_mpi4py(monkeypatch, RuntimeError, message)
+    with pytest.raises(RuntimeError, match=re.escape(message)):
+        conftest._import_oqp_initialises_mpi()
+
+
+@pytest.mark.parametrize("message", _MPI_FAILURES_AFTER_LOAD)
+def test_mpi_utils_propagates_other_mpi_runtime_errors(monkeypatch, message):
+    _install_failing_mpi4py(monkeypatch, RuntimeError, message)
+    spec = importlib.util.spec_from_file_location("_mpi_utils_broken_mpi", _MPI_UTILS)
+    module = importlib.util.module_from_spec(spec)
+    with pytest.raises(RuntimeError, match=re.escape(message)):
+        spec.loader.exec_module(module)
+
+
 def test_probe_mirrors_the_import_in_mpi_utils():
     # If mpi_utils stops initialising MPI at import (or catches other errors),
     # the probe above no longer describes what collection does.
     with open(_MPI_UTILS, encoding="utf-8") as handle:
         source = handle.read()
     assert re.search(r"^try:\n\s+from mpi4py import MPI\n", source, re.M)
-    assert re.search(r"^except \(ImportError, OSError, RuntimeError\)", source, re.M)
+    assert re.search(r"^except \(ImportError, OSError\)", source, re.M)
+    assert re.search(r'^_NO_LIBMPI_MESSAGE = "cannot load MPI library"$', source, re.M)
+    assert re.search(r"^except RuntimeError as \w+:\n\s+if not str\(\w+\)\."
+                     r"startswith\(_NO_LIBMPI_MESSAGE\):\n\s+raise\n", source, re.M)

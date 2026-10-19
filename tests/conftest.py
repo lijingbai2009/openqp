@@ -257,12 +257,17 @@ def _import_oqp_initialises_mpi():
     ``oqp/__init__.py`` builds ``MPIManager()``, and ``oqp.utils.mpi_utils``
     does ``from mpi4py import MPI`` at import, which initialises MPI unless
     mpi4py or its MPI library is missing.  Mirror that import exactly,
-    including mpi4py 4.x's RuntimeError("cannot load MPI library") when the
-    MPI shared library is absent.
+    including mpi4py 4.x's RuntimeError("cannot load MPI library ...") when
+    the MPI shared library is absent.  Any other RuntimeError (raised after
+    libmpi loaded) propagates, as it does from mpi_utils.
     """
     try:
         from mpi4py import MPI  # noqa: F401
-    except (ImportError, OSError, RuntimeError):
+    except (ImportError, OSError):
+        return False
+    except RuntimeError as error:
+        if not str(error).startswith("cannot load MPI library"):
+            raise
         return False
     return True
 

@@ -7,12 +7,22 @@ from collections.abc import Iterator
 # loaded (OSError), or -- mpi4py >= 4 -- the MPI shared library itself is
 # missing.  mpi4py 4.x resolves the MPI ABI in a meta-path finder
 # (mpi4py._mpiabi._Finder -> _dlopen_libmpi) that raises
-# RuntimeError("cannot load MPI library ...") during ``from mpi4py import MPI``.
-# All three leave this process serial; tests/conftest.py mirrors this import.
+# RuntimeError("cannot load MPI library\n<dlopen errors>") during
+# ``from mpi4py import MPI``.  Only that message means "no MPI".  Every other
+# RuntimeError (MPI_Abi_get_version [ierr=...], an MPI.Exception from
+# MPI_Init, ...) comes after libmpi loaded and must propagate: treating it as
+# "no MPI" would make every rank under mpiexec run serially as rank 0.
+# tests/conftest.py mirrors this import.
+_NO_LIBMPI_MESSAGE = "cannot load MPI library"
+
 try:
     from mpi4py import MPI
     mpi4py_available = True
-except (ImportError, OSError, RuntimeError) as e:
+except (ImportError, OSError) as e:
+    mpi4py_available = False
+except RuntimeError as e:
+    if not str(e).startswith(_NO_LIBMPI_MESSAGE):
+        raise
     mpi4py_available = False
 
 def plan_task_groups(nworld, ntask, ranks_per_group=0):
