@@ -953,7 +953,12 @@ contains
   end function davidson_safe_denominator
 
 !> @brief Orthonormalize q(xvec_dim,ndsr*2) and append to bvec
-  subroutine rpanewb(ndsr,bvec,q,novec,nvec,ick,tamm_dancoff)
+!> @details Candidates flagged in `optional_candidate` (the corrections of
+!>  roots whose residual already meets the convergence threshold) are
+!>  orthonormalized after every required candidate and only while subspace
+!>  slots remain. They still refine the subspace when there is room, but can
+!>  never take a slot from an unconverged root or end the solver with ick=2.
+  subroutine rpanewb(ndsr,bvec,q,novec,nvec,ick,tamm_dancoff,optional_candidate)
     use precision, only: dp
 
     implicit none
@@ -964,10 +969,11 @@ contains
     integer, intent(inout) :: novec, nvec
     integer, intent(out) :: ick
     logical, intent(in) :: tamm_dancoff
+    logical, intent(in), optional :: optional_candidate(:)
 
     real(kind=dp) :: bq, fnorm, max_abs_overlap, candidate_scale
-    integer :: istat, k, ms, ndsrt, mxvec
-    logical :: bad_vector
+    integer :: istat, k, ms, ndsrt, mxvec, pass, npass
+    logical :: bad_vector, is_optional
     real(kind=dp), parameter :: norm_threshold = 1.0D-09
     real(kind=dp), parameter :: reorth_threshold = 1.0D-08
 
@@ -981,7 +987,16 @@ contains
     ndsrt = ndsr*2
     if (tamm_dancoff) ndsrt = ndsr
 
+!   Pass 1 takes the required candidates, pass 2 the optional ones.
+    npass = 1
+    if (present(optional_candidate)) npass = 2
+
+    passes: do pass = 1, npass
     do k = 1, ndsrt
+      is_optional = .false.
+      if (present(optional_candidate)) is_optional = optional_candidate(k)
+      if (is_optional .neqv. (pass == 2)) cycle
+      if (is_optional .and. nvec == mxvec) exit passes
       if (any(.not. ieee_is_finite(q(:,k)))) cycle
       ! Dependence is a property of the direction, not the residual amplitude.
       ! Scale before taking the norm so finite very small/large updates cannot
@@ -1027,7 +1042,7 @@ contains
       if (fnorm<norm_threshold) cycle
 
       if (nvec==mxvec) then
-!       Error termination, no space left for new vectors
+!       Error termination, no space left for a required new vector
         ick = 2
         return
       end if
@@ -1036,6 +1051,7 @@ contains
       nvec = nvec+1
       bvec(:,nvec) = q(:,k)/fnorm
     end do
+    end do passes
 
 !   Error termination, no vectors added
     ms = nvec-novec

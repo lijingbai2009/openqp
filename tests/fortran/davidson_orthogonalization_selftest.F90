@@ -2,6 +2,7 @@ module davidson_orthogonalization_selftest_m
   use iso_c_binding, only: c_double, c_int
   use precision, only: dp
   use tdhf_lib, only: rpanewb
+  use tdhf_sf_lib, only: sfresvec, sfqvec
   use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan, ieee_positive_inf, ieee_is_finite
   implicit none
   private
@@ -87,5 +88,81 @@ contains
         end do
       end do
     end do
+    call sf_converged_root_cases(error, checks, failures)
   end subroutine davidson_orthogonalization_selftest
+
+  ! SF/MRSF chain sfresvec -> sfqvec -> rpanewb with two tracked roots in the
+  ! subspace span{e1,e2} of a signed 5x5 model matrix.  Root 1 couples to e4
+  ! only through c1; root 2 is unconverged through couplings to e3 and e5.
+  ! The drivers mark roots with ||r||^2 <= cnvtol as optional candidates.
+  subroutine sf_converged_root_cases(error, checks, failures)
+    real(c_double), intent(inout) :: error
+    integer(c_int), intent(inout) :: checks, failures
+    real(dp), parameter :: tol = 1.0e-10_dp
+    real(dp) :: q2(5), e4(5)
+
+    ! Root 2's preconditioned correction (-0.3 e3)/(2-3) + (0.2 e5)/(2-5) and
+    ! root 1's c1 e4/(1-4), both normalized.
+    q2 = 0.0_dp; q2(3) = 0.3_dp; q2(5) = -0.2_dp/3.0_dp
+    q2 = q2/norm2(q2)
+    e4 = 0.0_dp; e4(4) = -1.0_dp
+
+    ! Roundoff-sized residual on root 1, one free slot: the unconverged root
+    ! gets the slot.
+    call run_case(1.0e-14_dp, 3, .true., 0, 3, q2, q2)
+    ! Same data without the mask (the routine before this fix): root 1's
+    ! normalized noise takes the slot and the solver stops with ick=2.
+    call run_case(1.0e-14_dp, 3, .false., 2, 3, e4, e4)
+    ! ||r1||^2 = 2.5e-11 <= tol with two free slots: the converged root still
+    ! refines the subspace, after the required candidate.
+    call run_case(5.0e-6_dp, 4, .true., 0, 4, q2, e4)
+    ! ||r1||^2 = 4e-10 > tol: both roots are required; lack of space for one
+    ! of them is still reported as ick=2.
+    call run_case(2.0e-5_dp, 3, .true., 2, 3, e4, e4)
+
+  contains
+
+    subroutine run_case(c1, mxvec, use_mask, wanted_status, wanted_nvec, col3, col4)
+      real(dp), intent(in) :: c1, col3(5), col4(5)
+      integer, intent(in) :: mxvec, wanted_status, wanted_nvec
+      logical, intent(in) :: use_mask
+      real(dp) :: amat(5,5), basis(5,4), sigma(5,2), vec(2,2), eigv(2), xm(5), &
+                  q(5,2), rnorm(2), local_error
+      integer :: i, nvec, novec, status
+
+      amat = 0.0_dp
+      do i = 1, 5
+        amat(i,i) = real(i, dp)
+        xm(i) = real(i, dp)
+      end do
+      amat(2,3) = -0.3_dp; amat(3,2) = -0.3_dp
+      amat(2,5) =  0.2_dp; amat(5,2) =  0.2_dp
+      amat(1,4) = c1; amat(4,1) = c1
+      basis = 0.0_dp; basis(1,1) = 1.0_dp; basis(2,2) = 1.0_dp
+      sigma = matmul(amat, basis(:,1:2))
+      vec = 0.0_dp; vec(1,1) = 1.0_dp; vec(2,2) = 1.0_dp
+      eigv = [1.0_dp, 2.0_dp]
+      call sfresvec(q, basis(:,1:mxvec), sigma, vec, eigv, 2, rnorm, 2)
+      call sfqvec(q, xm, eigv, 2)
+      nvec = 2; novec = -1
+      if (use_mask) then
+        call rpanewb(2, basis(:,1:mxvec), q, novec, nvec, status, .true., &
+                     optional_candidate=rnorm<=tol)
+      else
+        call rpanewb(2, basis(:,1:mxvec), q, novec, nvec, status, .true.)
+      end if
+
+      checks = checks+1
+      if (status /= wanted_status .or. nvec /= wanted_nvec .or. novec /= 2) &
+        failures = failures+1
+      ! Original basis retained, appended columns are the expected unique
+      ! directions with their signs.
+      local_error = abs(basis(1,1)-1) + abs(basis(2,2)-1) &
+                  + sum(abs(basis(2:,1))) + abs(basis(1,2)) + sum(abs(basis(3:,2)))
+      local_error = max(local_error, maxval(abs(basis(:,3)-col3)))
+      if (wanted_nvec == 4) local_error = max(local_error, maxval(abs(basis(:,4)-col4)))
+      error = max(error, local_error)
+      if (local_error > 1.0e-12_dp) failures = failures+1
+    end subroutine run_case
+  end subroutine sf_converged_root_cases
 end module davidson_orthogonalization_selftest_m
