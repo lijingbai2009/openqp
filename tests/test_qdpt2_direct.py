@@ -45,8 +45,13 @@ def _run(tmp_path, project, *, system, basis, cas, pt2, ci=None, method="mcqdpt2
             "input": {"system": system, "charge": "0", "basis": basis,
                       "method": method, "runtype": "energy"},
             "guess": {"type": "hcore"},
+            # The default 1e-6 residual permits reference differences larger
+            # than the post-HF comparisons below, even when the printed SCF
+            # energies agree.  Engine comparisons also share one reference
+            # (_pt2_on_shared_reference); the tight residual still pins any
+            # test that compares separate runs.
             "scf": {"type": "rhf", "multiplicity": "1", "maxit": "60",
-                    "forced_attempt": "3", "save_molden": "False"},
+                    "conv": "1.0e-12", "forced_attempt": "3", "save_molden": "False"},
             "properties": {"scf_prop": ""},
             "cas": cas,
             "ci": ci_block,
