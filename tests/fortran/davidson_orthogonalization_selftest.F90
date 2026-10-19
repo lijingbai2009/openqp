@@ -110,9 +110,15 @@ contains
     ! Roundoff-sized residual on root 1, one free slot: the unconverged root
     ! gets the slot.
     call run_case(1.0e-14_dp, 3, .true., 0, 3, q2, q2)
-    ! Same data without the mask (the routine before this fix): root 1's
-    ! normalized noise takes the slot and the solver stops with ick=2.
-    call run_case(1.0e-14_dp, 3, .false., 2, 3, e4, e4)
+    ! Same data without the mask: sfresvec returns a zero correction for a
+    ! residual at its own rounding floor, so the noise no longer takes the
+    ! slot (before that floor it did, and the solver stopped with ick=2).
+    call run_case(1.0e-14_dp, 3, .false., 0, 3, q2, q2)
+    ! Roundoff-sized residual on root 1 with two free slots: its direction is
+    ! rounding noise and must not enter the subspace (before the floor e4 was
+    ! appended as a full unit vector, making the subspace depend on the
+    ! summation order of the sigma build).
+    call run_case(1.0e-14_dp, 4, .true., 0, 3, q2, q2)
     ! ||r1||^2 = 2.5e-11 <= tol with two free slots: the converged root still
     ! refines the subspace, after the required candidate.
     call run_case(5.0e-6_dp, 4, .true., 0, 4, q2, e4)
@@ -154,6 +160,10 @@ contains
 
       checks = checks+1
       if (status /= wanted_status .or. nvec /= wanted_nvec .or. novec /= 2) &
+        failures = failures+1
+      ! The floor zeroes only the correction: rnorm stays the computed
+      ! ||r||^2 = c1^2 of root 1 and 0.13 of root 2.
+      if (abs(rnorm(1) - c1**2) > 1.0e-12_dp*c1**2 .or. abs(rnorm(2) - 0.13_dp) > 1.0e-14_dp) &
         failures = failures+1
       ! Original basis retained, appended columns are the expected unique
       ! directions with their signs.
