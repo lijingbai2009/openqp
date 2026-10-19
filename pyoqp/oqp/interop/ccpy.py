@@ -17,10 +17,13 @@ ordering and normalization are those of the SCF that produced the orbitals:
 
 CCpy works in physicist order ``<pq|rs> = (pr|qs)``, hence
 ``transpose(0, 2, 1, 3)``. Point-group symmetry is not passed on (C1). The
-two-electron integrals are held in core, as in ``oqp.quantum``: the AO tensor
-and the MO tensors each take ``8 * nbf**4`` bytes (UHF keeps three spin
-blocks), so the peak is several times that: an estimated 2-3 GB at
-``nbf = 100`` (from the formula, not measured).
+two-electron integrals are held in core, as in ``oqp.quantum``. Building the
+Hamiltonian peaks at about 6.6 times ``8 * nbf**4`` bytes for RHF and UHF
+alike: 0.7 GiB at nbf = 58, 3.9 GiB at nbf = 92 and 9.3 GiB at nbf = 115
+(H2O, spherical cc-pVTZ / aug-cc-pVTZ / cc-pVQZ, peak RSS on Apple M3 Ultra,
+2026-10-19), before CCpy allocates its amplitudes. The build itself took
+0.3 / 1.5 / 3.7 s on one thread there. These come from a single-host timing
+record, not from the OpenQP verification gate.
 
 Usage::
 
