@@ -2070,6 +2070,53 @@ def _check_tb(config: dict[str, Any], report: CheckReport, *, section: str) -> N
         )
 
 
+def _check_dftgrid(config: dict[str, Any], report: CheckReport) -> None:
+    """Reject a [dftgrid] grid request that the native grid builder would drop."""
+    from oqp.molecule.oqpdata import (
+        DFTGRID_PRESETS, DFTGRID_UNPRUNED_SPELLINGS, OQP_CONFIG_SCHEMA,
+    )
+    dftgrid = config.get("dftgrid", {})
+    raw = dftgrid.get("pruned", "auto")
+    value = "" if raw is None else str(raw).strip()
+    allowed = {"auto"} | set(DFTGRID_UNPRUNED_SPELLINGS) | {p.lower() for p in DFTGRID_PRESETS}
+    if value.lower() not in allowed:
+        report.add(
+            "ERROR",
+            "dftgrid.pruned",
+            "Unknown DFT grid pruning preset; the grid builder would ignore it.",
+            value=value,
+            expected="auto, none, " + ", ".join(DFTGRID_PRESETS),
+            action="Use pruned=auto (SG2 unless rad_npts/ang_npts are set), "
+                   "pruned=none for the unpruned rad_npts x ang_npts grid, "
+                   "or one of SG0, SG1, SG2, SG3.",
+        )
+        return
+    if value.lower() == "auto" or value.lower() in DFTGRID_UNPRUNED_SPELLINGS:
+        return
+    if not _get(config, "input", "functional", ""):
+        return
+    schema = OQP_CONFIG_SCHEMA["dftgrid"]
+    try:
+        changed = [
+            f"{key}={int(dftgrid[key])}"
+            for key in ("rad_npts", "ang_npts")
+            if key in dftgrid and int(dftgrid[key]) != int(schema[key]["default"])
+        ]
+    except (TypeError, ValueError):
+        return
+    if changed:
+        report.add(
+            "WARNING",
+            "dftgrid.pruned",
+            f"The {value.upper()} preset defines its own radial and angular grids; "
+            f"{', '.join(changed)} is not used for the atoms the preset covers.",
+            value=f"pruned={value}, " + ", ".join(changed),
+            action="Remove pruned= (or set pruned=none) to run the requested "
+                   "unpruned rad_npts x ang_npts grid, or remove rad_npts/ang_npts "
+                   "to run the preset.",
+        )
+
+
 def _check_d4(config: dict[str, Any], report: CheckReport) -> None:
     keys = ("s6", "s8", "s9", "a1", "a2", "alp")
     raw = {key: _get(config, "d4", key, "") for key in keys}
@@ -7748,12 +7795,13 @@ def _check_hess(config: dict[str, Any], report: CheckReport,
             and method == "tdhf"
             and _as_lower(_get(config, "input", "functional", ""))
         ):
-            pruned = _as_lower(_get(config, "dftgrid", "pruned", "SG2"))
+            from oqp.molecule.oqpdata import resolve_dftgrid_pruned
             try:
                 rad_npts = int(_get(config, "dftgrid", "rad_npts", 96))
                 ang_npts = int(_get(config, "dftgrid", "ang_npts", 302))
+                pruned = resolve_dftgrid_pruned(config.get("dftgrid", {})).lower()
             except (TypeError, ValueError):
-                rad_npts, ang_npts = 96, 302
+                rad_npts, ang_npts, pruned = 96, 302, "sg2"
             # source/dftlib/dft.F90 selects a pruning scheme with
             # `select case (trim(pruned_name))` over SG0/SG1/SG2/SG3 and has no
             # `case default`, so every other spelling -- "", none, off, false --
@@ -8390,6 +8438,7 @@ def check_input_values(
     _check_qmmm_active_selection(config, report)
     _check_xtb(config, report)
     _check_d4(config, report)
+    _check_dftgrid(config, report)
     _check_scf(config, report)
     _check_symmetry(config, report)
     _check_tdhf(config, report)
