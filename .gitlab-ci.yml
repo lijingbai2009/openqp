@@ -117,10 +117,20 @@ linux-openblas64-full:
     - ldd "$LIBOQP" | tee linkage-linux-openblas64.log
     - grep -Eiq 'libopenblas64[^/[:space:]]*\.so' linkage-linux-openblas64.log
     - '! grep -Eiq ''libopenblas\.so'' linkage-linux-openblas64.log'
+    # This job builds ENABLE_MPI=OFF and runs pytest with --forked, so keep
+    # mpi4py out of its venv, as the GitHub pytest job does.  With mpi4py
+    # present, `import oqp` calls MPI_Init in the process pytest-forked forks
+    # once per test; tests/conftest.py refuses that combination.  MPI is
+    # exercised by linux-openblas64-mpi, which has its own venv.
+    - grep -v '^mpi4py' pyoqp/requirements.txt >"$TMPDIR/requirements-no-mpi.txt"
     - >-
       "$CI_PROJECT_DIR/.venv-ci/bin/python" -m pip install
-      -r pyoqp/requirements.txt 'numpy<2.2' geometric basis_set_exchange
+      -r "$TMPDIR/requirements-no-mpi.txt" 'numpy<2.2' geometric basis_set_exchange
       pytest pytest-xdist pytest-forked
+    - >-
+      "$CI_PROJECT_DIR/.venv-ci/bin/python" -c 'import importlib.util, sys;
+      sys.exit("mpi4py must not be installed in this --forked job"
+      if importlib.util.find_spec("mpi4py") else 0)'
     - >-
       "$CI_PROJECT_DIR/.venv-ci/bin/python" -c "import oqp; print(oqp.__file__)"
     - export OPENQP_ROOT="$("$CI_PROJECT_DIR/.venv-ci/bin/python" -c 'import oqp,os; print(os.path.dirname(oqp.__file__))' | tail -n1)"

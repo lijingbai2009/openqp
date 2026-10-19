@@ -146,3 +146,59 @@ def test_probe_mirrors_the_import_in_mpi_utils():
     assert re.search(r'^_NO_LIBMPI_MESSAGE = "cannot load MPI library"$', source, re.M)
     assert re.search(r"^except RuntimeError as \w+:\n\s+if not str\(\w+\)\."
                      r"startswith\(_NO_LIBMPI_MESSAGE\):\n\s+raise\n", source, re.M)
+
+
+_GITLAB_CI = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          ".gitlab-ci.yml")
+
+
+def _gitlab_jobs(text):
+    """Split .gitlab-ci.yml into {top-level key: block text}."""
+    jobs, name, lines = {}, None, []
+    for line in text.splitlines():
+        match = re.match(r"^([.\w-]+):\s*$", line)
+        if match:
+            if name is not None:
+                jobs[name] = "\n".join(lines)
+            name, lines = match.group(1), []
+        elif name is not None:
+            lines.append(line)
+    if name is not None:
+        jobs[name] = "\n".join(lines)
+    return jobs
+
+
+def _script_items(block):
+    """Each ``- ...`` item of a job, folded continuation lines joined."""
+    items, current = [], None
+    for line in block.splitlines():
+        if re.match(r"^\s{4}- ", line):
+            if current is not None:
+                items.append(current)
+            current = line.strip()[2:]
+        elif current is not None and line.startswith("      "):
+            current += " " + line.strip()
+        else:
+            if current is not None:
+                items.append(current)
+            current = None
+    if current is not None:
+        items.append(current)
+    return items
+
+
+def test_gitlab_forked_pytest_jobs_install_no_mpi4py():
+    # The conftest refusal above would stop such a job before any test runs.
+    # A job that runs pytest --forked must keep mpi4py out of its venv, as
+    # the GitHub pytest job does; MPI runs belong in their own job.
+    with open(_GITLAB_CI, encoding="utf-8") as handle:
+        jobs = _gitlab_jobs(handle.read())
+    forked = [name for name, block in jobs.items()
+              if re.search(r"-m pytest\b[^\n]*(\n[^\n]*){0,2}--forked", block)]
+    assert forked, "no GitLab job runs pytest --forked; update this test"
+    for name in forked:
+        for item in _script_items(jobs[name]):
+            if "pip install" not in item:
+                continue
+            assert "mpi4py" not in item, (name, item)
+            assert "pyoqp/requirements.txt" not in item, (name, item)
