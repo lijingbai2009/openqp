@@ -228,6 +228,43 @@ def test_windows_install_lock_raises_permanent_errors(monkeypatch, tmp_path, err
     assert attempts == [fake.LK_LOCK]
 
 
+class _RecordingData:
+    """mol.data stand-in that records which native records were deleted."""
+
+    def __init__(self, present=True):
+        self.deleted, self.present = [], present
+
+    def __delitem__(self, key):
+        if not self.present:
+            raise KeyError(key)
+        self.deleted.append(key)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_eri_record_is_released_on_success_and_failure(monkeypatch, fail):
+    seen = {}
+    _fake_ccpy_models(monkeypatch, seen)
+    if fail:
+        def reject(*a):
+            raise RuntimeError("reference energy mismatch")
+        monkeypatch.setattr(ccpy_interop, "_check_reference", reject)
+    data = _RecordingData()
+    mol = types.SimpleNamespace(config={"scf": {"type": "rohf"}, "input": {}}, data=data)
+    if fail:
+        with pytest.raises(RuntimeError, match="mismatch"):
+            ccpy_interop.hamiltonian_from_openqp(mol)
+    else:
+        ccpy_interop.hamiltonian_from_openqp(mol)
+    assert data.deleted == ["OQP::ERI_AO"]
+
+
+def test_missing_eri_record_is_not_an_error(monkeypatch):
+    _fake_ccpy_models(monkeypatch, {})
+    mol = types.SimpleNamespace(config={"scf": {"type": "uhf"}, "input": {}},
+                                data=_RecordingData(present=False))
+    ccpy_interop.hamiltonian_from_openqp(mol)
+
+
 class _CountData:
     """mol.data stand-in with only the counts: no integrals, no orbitals."""
 
@@ -299,7 +336,8 @@ def test_charge_reaches_the_ccpy_system(monkeypatch, scf_type, kind):
     seen = {}
     _fake_ccpy_models(monkeypatch, seen)
     mol = types.SimpleNamespace(config={"scf": {"type": scf_type},
-                                        "input": {"charge": 1}})
+                                        "input": {"charge": 1}},
+                                data=_RecordingData())
     ccpy_interop.hamiltonian_from_openqp(mol)
     assert seen[kind]["charge"] == 1
 

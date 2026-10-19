@@ -39,6 +39,7 @@ import importlib
 import os
 import subprocess
 import sys
+import traceback
 
 import numpy as np
 
@@ -345,9 +346,40 @@ def hamiltonian_from_openqp(mol, nfrozen=0, ndelete=0, reference=None,
     from ccpy.models.integrals import getHamiltonian, getUHFHamiltonian
     from ccpy.models.system import System, UHFSystem
 
-    d = _openqp_ao_data(mol)
+    # eri_ao() stores the nbf**4 AO tensor in the native OQP::ERI_AO record
+    # and returns views of it; release the record once CCpy has its own MO
+    # integrals, on success and on failure, after every view is gone.
+    d = None
+    try:
+        d = _openqp_ao_data(mol)
+        return _build_hamiltonian(
+            d, ref, na, nb, norb, nfrozen, ndelete,
+            int(mol.config["input"].get("charge", 0) or 0), e_scf,
+            normal_ordered, sorted, rohf_canonicalization,
+            (calc_hf_energy, calc_hf_frozen_core_energy, build_rohf_fock,
+             getHamiltonian, getUHFHamiltonian, System, UHFSystem))
+    except BaseException as exc:
+        # finished frames in the traceback still hold the borrowed views
+        traceback.clear_frames(exc.__traceback__)
+        raise
+    finally:
+        if d is not None:
+            d.clear()
+        _release_eri_ao(mol)
+
+
+def _release_eri_ao(mol):
+    try:
+        del mol.data["OQP::ERI_AO"]
+    except KeyError:
+        pass                                    # not allocated (failed before eri_ao)
+
+
+def _build_hamiltonian(d, ref, na, nb, norb, nfrozen, ndelete, charge, e_scf,
+                       normal_ordered, sorted, rohf_canonicalization, ccpy_api):
+    (calc_hf_energy, calc_hf_frozen_core_energy, build_rohf_fock,
+     getHamiltonian, getUHFHamiltonian, System, UHFSystem) = ccpy_api
     nelec, mult = na + nb, na - nb + 1
-    charge = int(mol.config["input"].get("charge", 0) or 0)
 
     if ref == "uhf":
         occ = {"a": np.array([1.0] * na + [0.0] * (norb - na)),
