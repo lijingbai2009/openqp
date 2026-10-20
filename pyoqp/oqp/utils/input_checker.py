@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 from oqp.utils.mpi_utils import MPIManager
+from oqp.utils.oqp_input import PT2_METHOD_IMPLIED
 
 
 SUPPORTED_RUNTYPES = {
@@ -205,6 +206,9 @@ PT2_REFERENCES = {"casci", "casscf"}
 PT2_CONTRACTIONS = {"uncontracted", "none", "full", "strong", "sc", "sc-nevpt2",
                     "ic", "internally-contracted"}
 PT2_STRONG_CONTRACTIONS = {"strong", "sc", "sc-nevpt2", "ic", "internally-contracted"}
+
+PT2_H0_FOCK = {"fock", "caspt2"}
+PT2_H0_DYALL = {"dyall", "nevpt2", "nevpt"}
 
 #: [pt2] gradient -- the nuclear-gradient route.  Checked here rather than only
 #: at dispatch: a misspelling would otherwise be discovered after the PT2 energy
@@ -5108,16 +5112,56 @@ def _check_pt2(config: dict[str, Any], report: CheckReport) -> None:
         action="Use reference=casci for fixed-orbital CI or reference=casscf after native CASSCF exists.",
         fallback="casscf",
     )
+    implied_h0, implied_contraction = PT2_METHOD_IMPLIED.get(
+        canonical_method, (None, None))
+    contraction_raw = str(_get(config, "pt2", "contraction", "") or "").strip().lower()
     contraction = _check_choice_literal(
-        _get(config, "pt2", "contraction", "uncontracted"),
+        _get(config, "pt2", "contraction", ""),
         "pt2.contraction",
         PT2_CONTRACTIONS,
         report,
         message="Unknown PT2 contraction mode.",
         action="Use contraction=uncontracted (determinant-space CASPT2/NEVPT2) or "
                "contraction=strong (RDM-based SC-NEVPT2; requires h0=dyall).",
-        fallback="uncontracted",
+        fallback=implied_contraction or "uncontracted",
+        default_if_none=True,
+        default_if_blank=True,
     )
+    # The h0 a blank value stands for; an unknown spelling is reported below.
+    h0_raw = str(_get(config, "pt2", "h0", "") or "").strip().lower()
+    if h0_raw in PT2_H0_FOCK:
+        h0_resolved = "fock"
+    elif h0_raw in PT2_H0_DYALL:
+        h0_resolved = "dyall"
+    elif not h0_raw:
+        h0_resolved = implied_h0 or "fock"
+    else:
+        h0_resolved = h0_raw
+    # A method that names its own H0/contraction contradicts an explicit,
+    # different one.  _caspt2_options refuses the same input, but only after
+    # the reference SCF/CASSCF has been computed.
+    if implied_h0 is not None and h0_raw and h0_resolved != implied_h0:
+        report.add(
+            "ERROR",
+            "pt2.h0",
+            f"method={canonical_method} is defined for Dyall's zeroth-order Hamiltonian.",
+            value=h0_raw,
+            expected=f"{implied_h0} (or leave unset)",
+            action=f"Drop [pt2] h0 for method={canonical_method}, or use method=caspt2 for h0=fock.",
+        )
+    if implied_contraction is not None and contraction_raw \
+            and contraction in PT2_CONTRACTIONS \
+            and (contraction in PT2_STRONG_CONTRACTIONS) != (implied_contraction == "strong"):
+        report.add(
+            "ERROR",
+            "pt2.contraction",
+            f"method={canonical_method} is the "
+            f"{'strongly contracted' if implied_contraction == 'strong' else 'uncontracted'} variant.",
+            value=contraction_raw,
+            expected=f"{implied_contraction} (or leave unset)",
+            action="Drop [pt2] contraction, or select the method that matches it "
+                   "(nevpt2 = uncontracted, sc-nevpt2 = strongly contracted).",
+        )
     multistate = _check_choice_literal(
         _get(config, "pt2", "multistate", "auto"),
         "pt2.multistate",
@@ -5369,13 +5413,12 @@ def _check_pt2(config: dict[str, Any], report: CheckReport) -> None:
         )
 
     if contraction in PT2_STRONG_CONTRACTIONS:
-        h0_mode = str(_get(config, "pt2", "h0", "fock") or "fock").strip().lower()
-        if h0_mode not in {"dyall", "nevpt2", "nevpt"}:
+        if h0_resolved != "dyall":
             report.add(
                 "ERROR",
                 "pt2.contraction",
                 "Strong contraction (SC-NEVPT2) is defined for Dyall's H0 only.",
-                value=f"contraction={contraction}, h0={h0_mode}",
+                value=f"contraction={contraction}, h0={h0_resolved}",
                 expected="h0=dyall",
                 action="Set [pt2] h0=dyall together with contraction=strong.",
             )

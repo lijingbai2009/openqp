@@ -263,8 +263,8 @@ SCHEMA = {
     },
     "pt2": {
         "variant": {"type": _string, "default": "auto"},
-        "h0": {"type": _string, "default": "fock"},
-        "contraction": {"type": _string, "default": "uncontracted"},
+        "h0": {"type": _string, "default": ""},
+        "contraction": {"type": _string, "default": ""},
         "gradient": {"type": _string, "default": "auto"},
         "ipea_shift": {"type": float, "default": "0.0"},
         "imaginary_shift": {"type": float, "default": "0.0"},

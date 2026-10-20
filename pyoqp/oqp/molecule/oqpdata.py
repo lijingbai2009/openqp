@@ -620,8 +620,13 @@ OQP_CONFIG_SCHEMA = {
     'pt2': {
         'variant': {'type': string, 'default': 'auto'},
         'reference': {'type': string, 'default': 'casscf'},
-        'h0': {'type': string, 'default': 'fock'},
-        'contraction': {'type': string, 'default': 'uncontracted'},
+        # Blank means "the method's own": caspt2/MRMP2 -> fock + uncontracted,
+        # nevpt2 -> dyall + uncontracted, sc-nevpt2 -> dyall + strong
+        # (PT2_METHOD_IMPLIED in oqp.utils.input_checker).  A concrete default
+        # here is indistinguishable from a user value, so `method=nevpt2`
+        # without `h0` was read as an explicit `h0=fock` and refused.
+        'h0': {'type': string, 'default': ''},
+        'contraction': {'type': string, 'default': ''},
         'frozen': {'type': string, 'default': 'auto'},
         'multistate': {'type': string, 'default': 'auto'},
         'xms': {'type': bool, 'default': 'False'},

@@ -89,6 +89,7 @@ from oqp.library.fci import (
 )
 from oqp.library.casscf import CASSCF, _solve_active
 from oqp.utils.file_utils import print_module_banner
+from oqp.utils.oqp_input import PT2_METHOD_IMPLIED
 
 _BOOL_TRUE = {"true", "t", "yes", "y", "1", "on"}
 _BOOL_FALSE = {"false", "f", "no", "n", "0", "off", ""}
@@ -167,11 +168,7 @@ def _as_int_tuple(value):
 #: what made routing them a matter of inspecting options instead of reading
 #: the method.  The old spelling keeps working -- it is what every existing
 #: input says -- and is simply the same calculation.
-_METHOD_IMPLIED_PT2 = {
-    "nevpt2": ("dyall", "none"),
-    "sc-nevpt2": ("dyall", "strong"),
-    "scnevpt2": ("dyall", "strong"),
-}
+_METHOD_IMPLIED_PT2 = PT2_METHOD_IMPLIED
 
 
 def _caspt2_options(config: dict) -> CASPT2Options:

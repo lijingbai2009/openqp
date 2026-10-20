@@ -3310,6 +3310,21 @@ def _normalize_typed_value(type_name: str, value: Any) -> Any:
     return text.lower()
 
 
+#: PT2 methods that name their own zeroth-order Hamiltonian and contraction
+#: (``input.method`` -> ``([pt2] h0, [pt2] contraction)``).  ``[pt2] h0`` and
+#: ``contraction`` have blank schema defaults meaning "the method's own value";
+#: every PT2 method not listed here resolves a blank h0 to ``fock`` and a blank
+#: contraction to uncontracted.  The single source for the runtime option
+#: reader (oqp.library.caspt2_dyall), preflight (oqp.utils.input_checker) and
+#: the effective-config comparison below; it lives here because this module
+#: must stay importable without liboqp.
+PT2_METHOD_IMPLIED = {
+    "nevpt2": ("dyall", "none"),
+    "sc-nevpt2": ("dyall", "strong"),
+    "scnevpt2": ("dyall", "strong"),
+}
+
+
 def _effective_config(
     config: Mapping[str, Mapping[str, str]],
     schema: Mapping[str, Mapping[str, Tuple[str, Any]]],
@@ -3328,6 +3343,15 @@ def _effective_config(
         for key, raw in values.items():
             if section not in schema or key not in schema[section]:
                 effective[(section, key)] = ("explicit", str(raw))
+    # A blank [pt2] h0 / contraction is the method's own value; resolve it the
+    # way the runtime does, so restating that value is recognized as a default.
+    method = str(effective.get(("input", "method"), "")).strip().lower()
+    implied_h0, implied_contraction = PT2_METHOD_IMPLIED.get(method, (None, None))
+    if effective.get(("pt2", "h0")) == "":
+        effective[("pt2", "h0")] = implied_h0 or "fock"
+    if effective.get(("pt2", "contraction")) == "":
+        effective[("pt2", "contraction")] = (
+            "strong" if implied_contraction == "strong" else "uncontracted")
     return effective
 
 
