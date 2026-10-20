@@ -431,8 +431,9 @@ class MECPClippedBlockTest(unittest.TestCase):
                 return np.array(rows)
 
         class LS:
-            def compute(self, mol, grad_list):
+            def compute(self, mol, grad_list, state_blocks=None):
                 calls["grad_list"] = grad_list
+                calls["state_blocks"] = state_blocks
                 return np.asarray(mol.energies), np.asarray(mol.grads)
 
         opt.mol, opt.sp, opt.grad, opt.ls = Mol(), SP(), Grad(), LS()
@@ -449,6 +450,8 @@ class MECPClippedBlockTest(unittest.TestCase):
         energy_i, energy_j, grad_i, grad_j = calls["pair"]
         self.assertEqual(calls["nstate"][:2], [3, 3])
         self.assertEqual(calls["grad_list"], [1, 2])
+        # the summary labels each solve in its own multiplicity
+        self.assertEqual(calls["state_blocks"], ((3, 1), (1, 3)))
         self.assertAlmostEqual(energy_i, -1.0 + 0.3 + 0.01)
         self.assertAlmostEqual(energy_j, -1.0 + 0.1 + 0.01)
         np.testing.assert_allclose(grad_i, [31.0, 31.0])

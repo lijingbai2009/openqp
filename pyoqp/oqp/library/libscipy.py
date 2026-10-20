@@ -908,7 +908,13 @@ class MECPOpt(Optimizer):
         self.mol.energies = np.concatenate((energies_1, energies_2[1:]))
         self.mol.grads = np.concatenate((np.asarray(grads_1)[:len(energies_1)],
                                          np.asarray(grads_2)[1:len(energies_2)]))
-        energies, grads = self.ls.compute(self.mol, grad_list=[self.istate, self.jstate + self.jblock])
+        # Label each block in its own multiplicity: the joined array would
+        # otherwise read as one ladder and print T0 as S{nstate}.
+        state_blocks = ((self.imult, self.jblock),
+                        (self.jmult, len(energies_2) - 1))
+        energies, grads = self.ls.compute(
+            self.mol, grad_list=[self.istate, self.jstate + self.jblock],
+            state_blocks=state_blocks)
         self.mol.energies = energies
         self.mol.grads = grads
 
