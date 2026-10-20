@@ -204,6 +204,7 @@ module types
     integer(c_int64_t) :: cc_cholesky = 2        !< Cholesky-factorise the ladder integrals (0=off, 1=on, 2=auto on memory)
     real(c_double) :: cc_cholesky_tol = 1.0e-10_dp !< Cholesky truncation threshold
     integer(c_int64_t) :: cc_cholesky_direct = 0 !< 0=auto (on memory), 1=always, 2=never
+    integer(c_int64_t) :: mp2_transform = 0 !< 0=auto, 1=guarded direct-J, 2=required packed n5
   end type control_parameters
 
   type, public, bind(c) :: tddft_parameters
@@ -231,6 +232,7 @@ module types
     integer(c_int64_t) :: z_solver = 0     !< z-vector solver: 0 (CG), 1 (GMRES legacy), 2 (MINRES), 3 (AUTO)
     integer(c_int64_t) :: gmres_dim = 50   !< The Restart dimension of GMRES 
     logical(c_bool) :: umrsf = .false.     !< UMRSF branch calculations switch in td_mrsf_energy module
+    logical(c_bool) :: pair_cache = .false.!< Reuse fixed spin-pair contractions in the MRSF and UMRSF energy response
   end type tddft_parameters
 
   type, public, bind(c) :: mpi_communicator

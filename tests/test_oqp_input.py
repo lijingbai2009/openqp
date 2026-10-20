@@ -441,6 +441,18 @@ def test_mp2_reference_is_route_owned_and_lowers_to_scf_type():
         )
 
 
+@pytest.mark.parametrize("transform", ["auto", "direct", "n5"])
+def test_mp2_transform_exact_and_inline_lowering(transform):
+    suffix = ' geom="h2o.xyz" energy'
+    _, inline = _parse(f'mp2(transform={transform})/6-31g' + suffix)
+    _, exact = _parse(f'mp2/6-31g mp2(transform={transform})' + suffix)
+    assert inline == exact
+    assert inline["mp2"]["transform"] == transform
+    assert "transform" not in inline.get("scf", {})
+    with pytest.raises(OQPInputError, match="route-owned"):
+        _parse(f'mp2(transform={transform})/6-31g mp2(transform=auto)' + suffix)
+
+
 def test_umrsf_uses_triplet_uhf_reference():
     spec, legacy = _parse(
         'umrsf(nstate=3)/bhhlyp/6-31g* geom="radical.xyz" energy()'
@@ -547,8 +559,13 @@ def test_unpruned_dft_grid_has_one_readable_canonical_spelling(spelling):
     rendered = oqp_input.render_canonical_oqp(spec)
     assert rendered == 'rks/pbe/6-31g dftgrid(pruned=none)\ngeom="h2o.xyz"\n'
     assert oqp_input.lower_to_legacy(spec)["dftgrid"]["pruned"] == "none"
-    # SG2 is the default and disappears; other presets are kept as written.
+    # The default is pruned=auto and disappears.  An explicit preset is kept
+    # as written: SG2 is what auto selects only while rad_npts/ang_npts keep
+    # their defaults, so an explicit SG2 is not a restatement of the default.
     assert "dftgrid" not in oqp_input.render_canonical_oqp(
+        oqp_input.parse_canonical_oqp('rks/pbe/6-31g geom="h2o.xyz" dftgrid(pruned=auto)')
+    )
+    assert "dftgrid(pruned=SG2)" in oqp_input.render_canonical_oqp(
         oqp_input.parse_canonical_oqp('rks/pbe/6-31g geom="h2o.xyz" dftgrid(pruned=SG2)')
     )
     assert "dftgrid(pruned=sg1)" in oqp_input.render_canonical_oqp(
@@ -2364,6 +2381,8 @@ def _atom_table(text):
 
 
 def test_every_wf_methods_example_has_a_committed_oqp_twin():
+    # 33 since H4_CASPT2_direct.inp added the explicit uncontracted direct
+    # CASPT2 energy route alongside the default dense example.
     # 29 since the analytic CASPT2 gradient added H4_CASPT2_numgrad.inp (the
     # central-difference companion the analytic route replaced as the default)
     # and H4_XMS-CASPT2_grad.inp (the multistate/XMS analytic gradient);
@@ -2390,7 +2409,12 @@ def test_every_wf_methods_example_has_a_committed_oqp_twin():
     # 31 since correlated-state irrep selection added H2O_CASCI_IRREP_B1.inp
     # ([ci] irrep) and H2_FCI_IRREP_B1U.inp ([fci] irrep with irrep_min_purity,
     # and the branch where the symmetry and spin filters must agree on a root).
-    assert len(WF_EXAMPLES) == 32
+    # 33 since H4_CASPT2_direct.inp (main, #479) pinned the explicit
+    # single-state CASPT2 direct energy path;
+    # 34 since H2O_CASSCF_CAS66_ANALYTIC.inp added the 400-determinant analytic
+    # CASSCF Hessian that selects the direct excitation products above the
+    # 4 MiB excitation-stack storage threshold.
+    assert len(WF_EXAMPLES) == 34
     missing = [
         name for name in WF_EXAMPLES
         if not (WF_EXAMPLE_DIR / name).with_suffix(".oqp").is_file()
@@ -2767,7 +2791,7 @@ def test_minimal_namd_uses_directional_stable_defaults_and_file_velocities():
     for key, value in expected.items():
         assert values['md', key] == value
     assert values['md', 'thrshe'] == 0.367493
-    assert values['dftgrid', 'pruned'] == 'sg2'
+    assert values['dftgrid', 'pruned'] == 'auto'
     assert values['scf', 'conv'] == values['tdhf', 'conv'] == 1e-8
 
 

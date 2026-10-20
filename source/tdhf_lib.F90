@@ -953,21 +953,27 @@ contains
   end function davidson_safe_denominator
 
 !> @brief Orthonormalize q(xvec_dim,ndsr*2) and append to bvec
-  subroutine rpanewb(ndsr,bvec,q,novec,nvec,ick,tamm_dancoff)
+!> @details Candidates flagged in `optional_candidate` (the corrections of
+!>  roots whose residual already meets the convergence threshold) are
+!>  orthonormalized after every required candidate and only while subspace
+!>  slots remain. They still refine the subspace when there is room, but can
+!>  never take a slot from an unconverged root or end the solver with ick=2.
+  subroutine rpanewb(ndsr,bvec,q,novec,nvec,ick,tamm_dancoff,optional_candidate)
     use precision, only: dp
 
     implicit none
 
     integer, intent(in) :: ndsr
-    real(kind=dp), intent(out), dimension(:,:) :: bvec
+    real(kind=dp), intent(inout), dimension(:,:) :: bvec
     real(kind=dp), intent(inout), dimension(:,:) :: q
     integer, intent(inout) :: novec, nvec
     integer, intent(out) :: ick
     logical, intent(in) :: tamm_dancoff
+    logical, intent(in), optional :: optional_candidate(:)
 
-    real(kind=dp) :: bq, fnorm, max_abs_overlap
-    integer :: istat, k, ms, ndsrt, mxvec
-    logical :: bad_vector
+    real(kind=dp) :: bq, fnorm, max_abs_overlap, candidate_scale
+    integer :: istat, k, ms, ndsrt, mxvec, pass, npass
+    logical :: bad_vector, is_optional
     real(kind=dp), parameter :: norm_threshold = 1.0D-09
     real(kind=dp), parameter :: reorth_threshold = 1.0D-08
 
@@ -981,8 +987,26 @@ contains
     ndsrt = ndsr*2
     if (tamm_dancoff) ndsrt = ndsr
 
+!   Pass 1 takes the required candidates, pass 2 the optional ones.
+    npass = 1
+    if (present(optional_candidate)) npass = 2
+
+    passes: do pass = 1, npass
     do k = 1, ndsrt
+      is_optional = .false.
+      if (present(optional_candidate)) is_optional = optional_candidate(k)
+      if (is_optional .neqv. (pass == 2)) cycle
+      if (is_optional .and. nvec == mxvec) exit passes
       if (any(.not. ieee_is_finite(q(:,k)))) cycle
+      ! Dependence is a property of the direction, not the residual amplitude.
+      ! Scale before taking the norm so finite very small/large updates cannot
+      ! underflow/overflow. The later cutoff then measures the remaining norm
+      ! relative to this unit candidate, including for tightly converged roots.
+      candidate_scale = maxval(abs(q(:,k)))
+      if (candidate_scale == 0.0_dp) cycle
+      q(:,k) = q(:,k)/candidate_scale
+      fnorm = norm2(q(:,k))
+      q(:,k) = q(:,k)/fnorm
       max_abs_overlap = 0.0_dp
       bad_vector = .false.
 !     MGS: orthonormalize next vector w.r.t. all
@@ -1018,7 +1042,7 @@ contains
       if (fnorm<norm_threshold) cycle
 
       if (nvec==mxvec) then
-!       Error termination, no space left for new vectors
+!       Error termination, no space left for a required new vector
         ick = 2
         return
       end if
@@ -1027,6 +1051,7 @@ contains
       nvec = nvec+1
       bvec(:,nvec) = q(:,k)/fnorm
     end do
+    end do passes
 
 !   Error termination, no vectors added
     ms = nvec-novec
@@ -1081,10 +1106,12 @@ contains
 
     if (tda) then
       ! vir->vib block
+      if (nvir > 0) then
       call dgemm('t', 'n', nvir, nvir, nocc, &
                   1.0d0, xpy, nocc, &
                          xpy, nocc, &
-                  0.0d0, t_mo(nocc+1:,nocc+1), nbf)
+                  0.0d0, t_mo(nocc+1,nocc+1), nbf)
+      end if
 
       ! occ->occ block
       call dgemm('n', 't', nocc, nocc, nvir,  &
@@ -1093,14 +1120,18 @@ contains
                   0.0d0, t_mo,  nbf)
     else
       ! vir->vib block
+      if (nvir > 0) then
       call dgemm('t', 'n', nvir, nvir, nocc, &
                  0.5d0, xpy, nocc, &
                         xpy, nocc,  &
-                 0.0d0, t_mo(nocc+1:, nocc+1), nbf)
+                 0.0d0, t_mo(nocc+1,nocc+1), nbf)
+      end if
+      if (nvir > 0) then
       call dgemm('t', 'n', nvir, nvir, nocc,  &
                  0.5d0, xmy, nocc, &
                         xmy, nocc,  &
-                 1.0d0, t_mo(nocc+1:, nocc+1), nbf)
+                 1.0d0, t_mo(nocc+1,nocc+1), nbf)
+      end if
 
       ! occ->occ block
       call dgemm('n', 't', nocc, nocc, nvir,  &

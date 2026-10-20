@@ -149,7 +149,105 @@ contains
       end do
     end do
     call mrsf_set_fp32(0)
+    call zero_scale_checks()
   contains
+    ! Zero-scaled Coulomb or exchange digestion (pure DFT exchange, CAM's
+    ! short-range pass) is skipped in every RHF/UROHF Fock path.  Pin it by
+    ! linearity against the unskipped path on non-symmetric data:
+    ! F(cJ,cK) = F(cJ,0) + F(0,cK), in the legacy and shell layouts, with the
+    ! replicated and the atomic accumulator, and with one and four images.
+    ! The shell layout is forced (shell_block_min=0), so storeints routes every
+    ! quartet through consume_shell; the legacy layout goes through update.
+    subroutine zero_scale_checks()
+      class(int2_fock_data_t), allocatable :: x
+      type(int2_storage_t) :: zbuf
+      real(dp), allocatable :: fz(:,:), ref(:,:)
+      real(dp), parameter :: sj(3)=[0.7_dp,0.7_dp,0.0_dp], sk(3)=[-0.3_dp,0.0_dp,-0.3_dp]
+      integer :: zk, lay, at, nt, sc, nz
+      do zk=1,2
+        do lay=1,2
+          do at=0,1
+            do nt=1,4,3
+              do sc=1,3
+                select case(zk)
+                case(1)
+                  allocate(int2_rhf_data_t::x)
+                case(2)
+                  allocate(int2_urohf_data_t::x)
+                end select
+                x%d=>den
+                x%scale_coulomb=sj(sc);x%scale_exchange=sk(sc)
+                x%num_passes=1;x%cur_pass=1
+                call x%parallel_start(basis,nt)
+                ! parallel_start sized f for the mode it chose (OQP_FOCK_ATOMIC
+                ! or the automatic memory rule).  Select the mode under test
+                ! and size the accumulator for it: one shared copy when
+                ! atomic, one copy per image otherwise.
+                x%atomic_fock=at==1
+                if (size(x%f,3)/=merge(1,nt,x%atomic_fock)) then
+                  deallocate(x%f)
+                  allocate(x%f(x%fockdim,x%nfocks,merge(1,nt,x%atomic_fock)),source=0.0_dp)
+                end if
+                x%shell_blocks=lay==2
+                x%shell_block_min=0
+                call zbuf%init(17)
+                nz=0
+                do a=1,4
+                  do b=1,a
+                    do c=1,a
+                      do d=1,merge(b,c,a==c)
+                        q=[a,b,c,d]
+                        do flip=1,8
+                          r=q(perms(:,flip));dims=basis%naos(r)
+                          eri%ids=q;eri%flips=perms(:,flip);eri%nbf=dims
+                          eri%weight=1.0_dp;eri%weighted_cutoff=.false.
+                          allocate(raw(dims(4),dims(3),dims(2),dims(1)),source=0.0_dp)
+                          do i=1,dims(1)
+                            do j=1,dims(2)
+                              do k=1,dims(3)
+                                do l=1,dims(4)
+                                  raw(l,k,j,i)=sin(real(3*i+7*j+5*k+11*l+flip,dp))*0.01_dp
+                                end do
+                              end do
+                            end do
+                          end do
+                          eri%pints=>raw
+                          zbuf%thread_id=1+modulo(flip,nt)
+                          call int2_compute_data_t_storeints(x,basis,eri,zbuf,1e-14_dp,nz)
+                          call x%update(zbuf)
+                          nullify(eri%pints)
+                          deallocate(raw)
+                        end do
+                      end do
+                    end do
+                  end do
+                end do
+                if (.not.allocated(fz)) allocate(fz(size(x%f,1)*size(x%f,2),3))
+                fz(:,sc)=reshape(sum(x%f,dim=3),[size(fz,1)])
+                call x%clean()
+                call zbuf%clean()
+                deallocate(x)
+              end do
+              ! Both separated pieces must carry signal, or linearity is vacuous.
+              if (maxval(abs(fz(:,2)))<1e-3_dp*maxval(abs(fz(:,1)))) failures=failures+1
+              if (maxval(abs(fz(:,3)))<1e-3_dp*maxval(abs(fz(:,1)))) failures=failures+1
+              delta=maxval(abs(fz(:,1)-fz(:,2)-fz(:,3)))
+              if (.not.allocated(ref)) then
+                ref=fz
+              else
+                ! Every layout/accumulator/image count reproduces the first
+                ! (legacy, replicated, one image) J, K and full matrices.
+                delta=max(delta,maxval(abs(fz-ref)))
+              end if
+              error=max(error,delta)
+              checks=checks+1
+              if (delta>2e-10_dp) failures=failures+1
+            end do
+          end do
+        end do
+        deallocate(ref,fz)
+      end do
+    end subroutine
     subroutine attach(x)
       class(int2_compute_data_t),intent(inout)::x
       select type(x)
@@ -164,8 +262,10 @@ contains
         x%int_apb=.true.;x%int_amb=.true.
       type is(int2_mrsf_data_t)
         x%d3=>mr(:,1:7,:,:)
+        x%general_only=mode==6
       type is(int2_umrsf_data_t)
         x%d3=>mr
+        x%general_only=mode==6
       end select
     end subroutine
     subroutine compare(delta)

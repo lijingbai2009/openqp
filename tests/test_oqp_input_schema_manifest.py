@@ -235,10 +235,25 @@ def test_all_generic_schema_keys_survive_parse_render_reparse_and_lower():
     # [qmmm] active_atoms, frozen_atoms, active_radius and active_from_pdb;
     # 368 with the ACID cube grid controls [properties] acid_spacing and
     # acid_padding.
-    # 369 with the DKH decoupling-basis control [scf] scal_rel_decontract.
-    # 372 with the spin-orbit step of a properties/data run: [properties] soc
-    # and the per-manifold gradient selectors grad_s and grad_t.
-    assert len(checked) == 372
+    # The spin-orbit step of a properties/data run adds [properties] soc and
+    # the per-manifold gradient selectors grad_s and grad_t; each must be in
+    # the manifest, and without them the count is the one below.
+    soc_keys = {("properties", "soc"), ("properties", "grad_s"),
+                ("properties", "grad_t")}
+    for key in soc_keys:
+        assert key in checked
+    assert len(checked) == 374
+    checked = [key for key in checked if key not in soc_keys]
+    # 369 with the DKH decoupling-basis control [scf] scal_rel_decontract;
+    # 370 with the MP2 energy transformation selector [mp2] transform;
+    # 371 with the MRSF energy spin-pair cache switch [tdhf] pair_cache.
+    assert ("mp2", "transform") in checked
+    assert ("tdhf", "pair_cache") in checked
+    assert len(checked) == 371
+    # Keep the prior manifest count exact after removing the new selector.
+    # The original 369 controls must still be represented, in addition to it.
+    checked = [key for key in checked if key not in {("mp2", "transform"), ("tdhf", "pair_cache")}]
+    assert len(checked) == 369
 
 
 def test_concise_geometry_drivers_reject_legacy_backend_selectors():

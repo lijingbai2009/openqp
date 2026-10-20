@@ -539,6 +539,8 @@ class _WorkflowProxy:
         # Gas-phase by default; combine with job.qmmm(...) for QM/MM NAMD and
         # pass soc=True (with optional soc_basis) for SOC-NAMD.
         object.__setattr__(self, "namd", _WorkflowNAMDProxy(owner))
+        # External CCpy coupled cluster on the HF orbitals; returns the driver.
+        object.__setattr__(self, "ccpy", owner.ccpy)
 
     def __call__(self, runtype=None, **kwargs):
         return self._owner._control(
@@ -615,6 +617,7 @@ class OpenQP:
         self.unit = "Angstrom"
         self.runner = None
         self.mol = None
+        self._mol_config = None
         self.theory = _TheoryProxy(self)
         self.workflow = _WorkflowProxy(self)
         self.settings = _SettingsProxy(self)
@@ -1205,10 +1208,45 @@ class OpenQP:
         kwargs["triples"] = True
         return self.ccsd(**kwargs)
 
+    def ccpy(self, nfrozen=0, ndelete=0, **kwargs):
+        """Return a driver of the external CCpy coupled-cluster library.
+
+        Runs the job first when it has not run yet, or when its configuration
+        changed since the last run; the job must then be a
+        Hartree-Fock (RHF, ROHF or UHF) single point, the default of
+        ``molecule(...)``. CCpy is downloaded on first use; see
+        :mod:`oqp.interop.ccpy`. Unlike the setup helpers this returns the
+        CCpy driver, not ``self``::
+
+            driver = OpenQP("h2o").molecule(geometry="water", basis="cc-pvdz").ccpy(nfrozen=1)
+            driver.run_cc(method="ccsd")
+        """
+        # Reuse a finished run only when the job has not been changed since;
+        # set()/molecule() edit config_str but leave the old integrals,
+        # orbitals and SCF energy on self.mol.
+        # Checked for a finished run too: a completed method=ccsd job holds a
+        # correlated energy, and nothing may be downloaded for it.
+        config = self.config_str
+        method = str(config.get("input", {}).get("method", "hf")).lower()
+        functional = str(config.get("input", {}).get("functional", "") or "")
+        if method != "hf" or functional:
+            raise ValueError(
+                "OpenQP.ccpy() needs a Hartree-Fock reference: use method='hf' "
+                f"without a functional (got method={method!r}, "
+                f"functional={functional!r}).")
+        if self.mol is None or self._mol_config != config:
+            self.run()
+        from oqp.interop.ccpy import driver_from_openqp
+        return driver_from_openqp(self.mol, nfrozen=nfrozen, ndelete=ndelete, **kwargs)
+
     def mp2(self, reference="rhf", runtype=None, multiplicity=None,
             basis=None, variant=None, same_spin_scale=None,
-            opposite_spin_scale=None, **scf_keywords):
+            opposite_spin_scale=None, transform=None, **scf_keywords):
         """Use a compact OpenQP MP2 setup for energy or analytic-gradient jobs."""
+        if transform is not None:
+            transform = str(transform).strip().lower()
+            if transform not in {"auto", "direct", "n5"}:
+                raise ValueError("mp2.transform must be auto, direct, or n5")
         if runtype is None:
             runtype = "energy"
         elif str(runtype).lower() not in {"energy", "grad", "optimize", "ts", "mep", "irc"}:
@@ -1253,6 +1291,8 @@ class OpenQP:
             self._set_optimize_options(istate=0)
 
         mp2_updates = {}
+        if transform is not None:
+            mp2_updates["transform"] = transform
         if variant is not None:
             mp2_updates["variant"] = variant
         if same_spin_scale is not None:
@@ -2266,6 +2306,9 @@ class OpenQP:
         )
         self.runner.run()
         self.mol = self.runner.mol
+        # The configuration this molecule was computed with; consumers of the
+        # finished run (ccpy) compare it with the current one.
+        self._mol_config = deepcopy(self.config_str)
         return self.mol
 
     def _canonicalize_key_value(self, key, value):

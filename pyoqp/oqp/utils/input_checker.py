@@ -256,6 +256,7 @@ WIKI_HELP = {
     "input.runtype": "Use energy, ekt, grad, hess, nac, nacme, optimize, meci, mecp, mep, ts, irc, neb, md, namd, soc, prop, or data. md runs ground-state Born-Oppenheimer molecular dynamics; namd runs excited-state nonadiabatic dynamics.",
     "input.method": "Use method=hf for HF/DFT, method=tdhf for TDHF/TDDFT/SF/MRSF, method=mp2 for ground-state MP2, method=ccsd or ccsd(t) for closed-shell coupled cluster, method=dftb for the optional OpenQP-DFTB backend, method=xtb for the optional OpenQP-xTB (LC-GFN1-xTB) backend, method=fci for legacy FCI-style CI, method=casci for fixed-orbital active-space CI, method=casscf for native CASSCF macroiterations, method=sa-casscf with [state_average] enabled=true for native SA-CASSCF, method=caspt2 for native determinant-space state-specific PT2, method=ms-caspt2 for native determinant-space multistate PT2, method=xms-caspt2 for native determinant-space extended multistate PT2, or the GAMESS-convention QDPT family: method=mrmp2 (single-state), method=mcqdpt2 (multistate, single-set), method=xmcqdpt2 (Granovsky extended H0).",
     "mp2.variant": "Use mp2, scs-mp2, sos-mp2, os-mp2, ss-mp2, scs-mi-mp2, or custom with explicit OS/SS scales.",
+    "mp2.transform": "Use auto for the normal size/work guard, direct for guarded direct-J, or n5 for a required packed energy transform. n5 can use occupied-virtual storage but stops if neither packed route succeeds.",
     "input.system": "Set system to an XYZ file path or inline coordinates with one atom per indented line.",
     "input.basis": "Set basis to a basis name, a comma-separated per-atom list, or library with tagged atoms and [input] library mappings.",
     "scf.type": "RHF is for multiplicity 1 closed-shell references. SF/MRSF needs an open-shell reference, usually ROHF.",
@@ -2089,6 +2090,53 @@ def _check_tb(config: dict[str, Any], report: CheckReport, *, section: str) -> N
         )
 
 
+def _check_dftgrid(config: dict[str, Any], report: CheckReport) -> None:
+    """Reject a [dftgrid] grid request that the native grid builder would drop."""
+    from oqp.molecule.oqpdata import (
+        DFTGRID_PRESETS, DFTGRID_UNPRUNED_SPELLINGS, OQP_CONFIG_SCHEMA,
+    )
+    dftgrid = config.get("dftgrid", {})
+    raw = dftgrid.get("pruned", "auto")
+    value = "" if raw is None else str(raw).strip()
+    allowed = {"auto"} | set(DFTGRID_UNPRUNED_SPELLINGS) | {p.lower() for p in DFTGRID_PRESETS}
+    if value.lower() not in allowed:
+        report.add(
+            "ERROR",
+            "dftgrid.pruned",
+            "Unknown DFT grid pruning preset; the grid builder would ignore it.",
+            value=value,
+            expected="auto, none, " + ", ".join(DFTGRID_PRESETS),
+            action="Use pruned=auto (SG2 unless rad_npts/ang_npts are set), "
+                   "pruned=none for the unpruned rad_npts x ang_npts grid, "
+                   "or one of SG0, SG1, SG2, SG3.",
+        )
+        return
+    if value.lower() == "auto" or value.lower() in DFTGRID_UNPRUNED_SPELLINGS:
+        return
+    if not _get(config, "input", "functional", ""):
+        return
+    schema = OQP_CONFIG_SCHEMA["dftgrid"]
+    try:
+        changed = [
+            f"{key}={int(dftgrid[key])}"
+            for key in ("rad_npts", "ang_npts")
+            if key in dftgrid and int(dftgrid[key]) != int(schema[key]["default"])
+        ]
+    except (TypeError, ValueError):
+        return
+    if changed:
+        report.add(
+            "WARNING",
+            "dftgrid.pruned",
+            f"The {value.upper()} preset defines its own radial and angular grids; "
+            f"{', '.join(changed)} is not used for the atoms the preset covers.",
+            value=f"pruned={value}, " + ", ".join(changed),
+            action="Remove pruned= (or set pruned=none) to run the requested "
+                   "unpruned rad_npts x ang_npts grid, or remove rad_npts/ang_npts "
+                   "to run the preset.",
+        )
+
+
 def _check_d4(config: dict[str, Any], report: CheckReport) -> None:
     keys = ("s6", "s8", "s9", "a1", "a2", "alp")
     raw = {key: _get(config, "d4", key, "") for key in keys}
@@ -2533,11 +2581,20 @@ def _check_mp2(config: dict[str, Any], report: CheckReport) -> None:
 
     functional = _get(config, "input", "functional", "")
     variant = _as_lower(_get(config, "mp2", "variant", "mp2"))
+    transform = str(_get(config, "mp2", "transform", "auto")).strip().lower()
     ss_scale = _get(config, "mp2", "same_spin_scale", 1.0)
     os_scale = _get(config, "mp2", "opposite_spin_scale", 1.0)
     runtype = _as_lower(_get(config, "input", "runtype", "energy"))
     reference = _as_lower(_get(config, "scf", "type", "rhf"))
     derivative_runtypes = {"grad", "optimize", "ts", "mep", "irc"}
+
+    if transform not in {"auto", "direct", "n5"}:
+        report.add(
+            "ERROR", "mp2.transform", "Unknown MP2 transformation selector.",
+            value=transform, expected="auto, direct, or n5",
+            action="Set [mp2] transform=auto, direct, or n5.",
+            wiki=WIKI_HELP["mp2.transform"],
+        )
 
     if functional:
         report.add(
@@ -5260,14 +5317,29 @@ def _check_pt2(config: dict[str, Any], report: CheckReport) -> None:
         )
     elif engine_mode in {"direct", "python", "fortran"} \
             and canonical_method not in PT2_QDPT_METHODS:
-        report.add(
-            "ERROR",
-            "pt2.engine",
-            "The matrix-free direct engine requires a diagonal H0 (QDPT family).",
-            value={"method": canonical_method, "engine": engine_mode},
-            expected="method=mrmp2/mcqdpt2/xmcqdpt2 for engine=direct/fortran",
-            action="Use the QDPT-family methods, or engine=dense for CASPT2/NEVPT2.",
+        # This is an uncontracted, single-state energy contraction. In
+        # particular it must not intercept a strong-contraction request.
+        _h0_direct = _as_lower(_get(config, "pt2", "h0", "fock") or "fock")
+        _contr_direct = _as_lower(_get(config, "pt2", "contraction", "none") or "none")
+        _ipea_valid, _ipea_direct = _check_float_literal(
+            _get(config, "pt2", "ipea_shift", 0.0), "pt2.ipea_shift", report)
+        _caspt2_direct = (
+            canonical_method == "caspt2" and normalized_variant == "caspt2"
+            and _h0_direct in {"fock", "caspt2"}
+            and _contr_direct in {"none", "uncontracted", "full"}
+            and _ipea_valid and _ipea_direct == 0.0
+            and _as_lower(_get(config, "input", "runtype", "energy")) == "energy"
         )
+        if not _caspt2_direct:
+            report.add(
+                "ERROR",
+                "pt2.engine",
+                "The direct engine requires diagonal-Fock QDPT or uncontracted "
+                "single-state CASPT2 energy with zero IPEA shift.",
+                value={"method": canonical_method, "engine": engine_mode},
+                expected="CASPT2 energy: h0=fock, contraction=none, ipea_shift=0",
+                action="Use engine=dense for other CASPT2/NEVPT2 requests.",
+            )
     _check_int_literal(
         _get(config, "pt2", "max_terms", 30000000),
         "pt2.max_terms",
@@ -5443,6 +5515,15 @@ def _check_pt2(config: dict[str, Any], report: CheckReport) -> None:
             "PT2 target roots must be unique.",
             value=target_roots,
             action="Remove duplicate PT2 root slots.",
+        )
+    if normalized_variant in PT2_SINGLE_STATE_METHODS and len(parsed_target_roots) > 1:
+        report.add(
+            "ERROR",
+            "pt2.target_roots",
+            "Single-state PT2 corrects exactly one target root at a time.",
+            value=target_roots,
+            expected="one root slot (or leave unset for root 0)",
+            action="Select one target root, or use a multistate PT2 method.",
         )
     # A one-element explicit list passes the count/bounds checks below, and
     # _reference_roots then honours it -- so the runtime diagonalises a 1x1
@@ -8081,12 +8162,13 @@ def _check_hess(config: dict[str, Any], report: CheckReport,
             and method == "tdhf"
             and _as_lower(_get(config, "input", "functional", ""))
         ):
-            pruned = _as_lower(_get(config, "dftgrid", "pruned", "SG2"))
+            from oqp.molecule.oqpdata import resolve_dftgrid_pruned
             try:
                 rad_npts = int(_get(config, "dftgrid", "rad_npts", 96))
                 ang_npts = int(_get(config, "dftgrid", "ang_npts", 302))
+                pruned = resolve_dftgrid_pruned(config.get("dftgrid", {})).lower()
             except (TypeError, ValueError):
-                rad_npts, ang_npts = 96, 302
+                rad_npts, ang_npts, pruned = 96, 302, "sg2"
             # source/dftlib/dft.F90 selects a pruning scheme with
             # `select case (trim(pruned_name))` over SG0/SG1/SG2/SG3 and has no
             # `case default`, so every other spelling -- "", none, off, false --
@@ -8723,6 +8805,7 @@ def check_input_values(
     _check_qmmm_active_selection(config, report)
     _check_xtb(config, report)
     _check_d4(config, report)
+    _check_dftgrid(config, report)
     _check_scf(config, report)
     _check_symmetry(config, report)
     _check_tdhf(config, report)

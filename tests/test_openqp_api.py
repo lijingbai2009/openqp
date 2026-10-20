@@ -150,6 +150,7 @@ SCHEMA = {
     },
     "mp2": {
         "variant": {"type": _string, "default": "mp2"},
+        "transform": {"type": _string, "default": "auto"},
         "same_spin_scale": {"type": float, "default": "1.0"},
         "opposite_spin_scale": {"type": float, "default": "1.0"},
     },
@@ -624,6 +625,86 @@ $$$$
             self.assertEqual(config["input"]["method"], "ccsd(t)")
             self.assertEqual(config["scf"]["type"], reference)
 
+    def _fake_ccpy_interop(self, calls):
+        interop = types.ModuleType("oqp.interop")
+        interop.__path__ = []
+        fake = types.ModuleType("oqp.interop.ccpy")
+
+        def driver_from_openqp(mol, **kwargs):
+            calls.append((mol, kwargs))
+            return "driver"
+
+        fake.driver_from_openqp = driver_from_openqp
+        return {"oqp.interop": interop, "oqp.interop.ccpy": fake}
+
+    def test_ccpy_helper_runs_the_hf_reference_then_returns_the_driver(self):
+        from unittest import mock
+        openqp = load_openqp_module()
+        runner_cls = openqp.Runner
+        runner_cls.instances.clear()
+        job = openqp.OpenQP(project="h2o_ccpy").molecule(geometry="water", basis="cc-pvdz")
+        calls = []
+        with mock.patch.dict(sys.modules, self._fake_ccpy_interop(calls)):
+            self.assertEqual(job.ccpy(nfrozen=1), "driver")
+            job.ccpy()                                    # unchanged: reuses the run
+        self.assertEqual(len(runner_cls.instances), 1)
+        self.assertTrue(runner_cls.instances[0].ran)
+        self.assertEqual(runner_cls.instances[0].input_dict["input"]["method"], "hf")
+        first_mol = runner_cls.instances[0].mol
+        self.assertEqual(calls, [(first_mol, {"nfrozen": 1, "ndelete": 0}),
+                                 (first_mol, {"nfrozen": 0, "ndelete": 0})])
+
+    def test_ccpy_helper_reruns_after_the_job_changes(self):
+        """job.run(); job.molecule(new); job.ccpy() must not reuse the old
+        molecule's integrals and orbitals."""
+        from unittest import mock
+        openqp = load_openqp_module()
+        runner_cls = openqp.Runner
+        runner_cls.instances.clear()
+        job = openqp.OpenQP(project="h2_ccpy").molecule("H 0 0 0; H 0 0 0.74", basis="sto-3g")
+        job.run()
+        job.molecule("H 0 0 0; H 0 0 1.40", basis="sto-3g")
+        calls = []
+        with mock.patch.dict(sys.modules, self._fake_ccpy_interop(calls)):
+            job.ccpy()
+        self.assertEqual(len(runner_cls.instances), 2)
+        self.assertIn("1.4", runner_cls.instances[1].input_dict["input"]["system"])
+        self.assertIs(calls[0][0], runner_cls.instances[1].mol)
+
+    def test_ccpy_helper_rejects_a_finished_non_hf_job(self):
+        """job.ccsd().run(); job.ccpy() must be refused, not reuse the run."""
+        from unittest import mock
+        openqp = load_openqp_module()
+        job = openqp.OpenQP(project="h2o_ccsd").molecule(geometry="water", basis="sto-3g")
+        job.ccsd().run()
+        calls = []
+        with mock.patch.dict(sys.modules, self._fake_ccpy_interop(calls)):
+            with self.assertRaises(ValueError):
+                job.ccpy()
+        self.assertEqual(calls, [])
+
+    def test_workflow_namespace_exposes_ccpy(self):
+        from unittest import mock
+        openqp = load_openqp_module()
+        openqp.Runner.instances.clear()
+        job = openqp.OpenQP(project="h2o_wf").molecule(geometry="water", basis="sto-3g")
+        calls = []
+        with mock.patch.dict(sys.modules, self._fake_ccpy_interop(calls)):
+            self.assertEqual(job.workflow.ccpy(nfrozen=1), "driver")
+        self.assertEqual(calls, [(openqp.Runner.instances[0].mol,
+                                  {"nfrozen": 1, "ndelete": 0})])
+
+    def test_ccpy_helper_rejects_a_non_hf_job_before_running(self):
+        from unittest import mock
+        openqp = load_openqp_module()
+        for setup in (lambda j: j.ccsd(), lambda j: j.input(functional="bhhlyp")):
+            job = setup(openqp.OpenQP(project="bad").molecule(geometry="water",
+                                                              basis="sto-3g"))
+            job.run = lambda run_type=None: self.fail("ran a non-HF job")
+            with mock.patch.dict(sys.modules, self._fake_ccpy_interop([])):
+                with self.assertRaises(ValueError):
+                    job.ccpy()
+
     def test_ccsd_helper_rejects_a_dft_functional(self):
         openqp = load_openqp_module()
 
@@ -668,7 +749,7 @@ $$$$
         job = (
             openqp.OpenQP(project="h2o_mp2")
             .molecule(geometry="water", basis="6-31g", charge=0, multiplicity=1)
-            .mp2(reference="uhf", variant="scs-mp2", conv=1.0e-10)
+            .mp2(reference="uhf", variant="scs-mp2", transform=" N5 ", conv=1.0e-10)
         )
 
         config = job.to_input_dict()
@@ -679,6 +760,20 @@ $$$$
         self.assertEqual(config["scf"]["type"], "uhf")
         self.assertEqual(config["scf"]["conv"], "1e-10")
         self.assertEqual(config["mp2"]["variant"], "scs-mp2")
+        self.assertEqual(config["mp2"]["transform"], "n5")
+        self.assertNotIn("transform", config["scf"])
+
+    def test_mp2_transform_settings_and_invalid_helper_preserve_job(self):
+        openqp = load_openqp_module()
+        job = openqp.OpenQP(project="transform_settings").dft("pbe")
+        before = job.to_input_dict()
+        with self.assertRaisesRegex(ValueError, "mp2.transform"):
+            job.mp2(transform="unknown", basis="cc-pvtz", conv=1e-10)
+        self.assertEqual(job.to_input_dict(), before)
+        for transform in ("auto", "direct", "n5"):
+            with self.subTest(transform=transform):
+                job.settings.mp2(transform=transform)
+                self.assertEqual(job.to_input_dict()["mp2"]["transform"], transform)
 
     def test_mp2_helper_clears_prior_dft_and_sets_custom_scales(self):
         openqp = load_openqp_module()
