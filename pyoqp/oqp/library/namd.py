@@ -1006,8 +1006,10 @@ class NAMD:
                 "droplet/solute_com/flexible/NVT controls currently support "
                 "same-spin NAMD only"
             )
-        if (self.droplet_enabled or self.solute_com_enabled) and not self._as_bool(
-                cfg.get('input', {}).get('qmmm_flag', False)):
+        if (self.droplet_enabled or self.solute_com_enabled
+                or self.flexible_enabled) and not self._as_bool(
+                    cfg.get('input', {}).get('qmmm_flag', False)):
+            # all-QM: droplet/solute_com targets; [flexible] is refused here
             self._setup_gas_restraint_targets()
         self._rng_step = 0
         self._last_hop_random = np.nan

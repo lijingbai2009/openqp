@@ -126,7 +126,10 @@ holds the separation: each solvent molecule is placed by its anchor atom
 so the actual partition costs nothing when every QM molecule is closer than
 every MM molecule. A whole residue named in `resnames` is a QM molecule when
 all its atoms are in `[qmmm] qm_atoms` and an MM molecule otherwise; a residue
-split between the regions is an error. For a solute in water:
+split between the regions is an error, and so is a massless anchor (a
+virtual site cannot carry the boundary force). `[flexible]` needs QM/MM and is
+refused in SOC-NAMD, whose propagators do not apply the conservative
+restraints. For a solute in water:
 
 ```text
 flexible(enabled=true, alpha=5.0, temperature=300, center=solute, atoms="0-11", anchor=O)
@@ -141,7 +144,10 @@ by default the QM atoms that are not solvent), `center=point` the fixed
 solvent molecules (non-periodic only). Periodic runs (`cutoff=PME`) use the
 minimum-image distance and stop when a QM solvent molecule is not closer than
 half the box (MM molecules farther out contribute nothing). The partition sum follows the authors' OpenMM reference kernel
-(`threshold`, `scale`, `max_iterations`, `keep_below_threshold`), and
+(`threshold`, `scale`, `max_iterations`, `keep_below_threshold`), except
+that a first sum of exactly one is re-evaluated at the lowered threshold
+instead of being accepted (the kernel's shortcut drops every partition below
+the initial threshold and can return zero boundary energy and force), and
 `tests/test_flexible_boundary.py` checks energies and forces against values
 computed with that plugin (`tests/data/flexible_boundary_plugin_reference.json`;
 the generator is kept in openqp-devkit).

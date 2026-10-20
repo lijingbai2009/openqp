@@ -235,6 +235,41 @@ def test_threshold_is_lowered_even_when_the_first_sum_is_one():
     assert np.max(np.abs(force)) > 0.0
 
 
+def test_review_case_qm_anchor_at_the_centre_mm_anchor_at_2p7_bohr():
+    """The review's exact case: QM anchor at 0, MM anchor at 2.7 bohr, alpha 1.
+
+    The swapped partition (weight exp(-g(2.7)) = 0.0049) lies below the
+    initial threshold 0.01, so the first sum is exactly one.  The lowered
+    threshold collects it: denominator 1.0049, energy kT ln(1.0049), and the
+    force on the MM anchor kT g'(2.7) w/(1 + w), checked analytically and by
+    finite differences.  The QM anchor sits on the centre, where the radial
+    direction is undefined; it receives no force.
+    """
+    xyz = np.array([[0.0, 0.0, 0.0], [2.7, 0.0, 0.0]])
+    boundary = FlexiBLEBoundary(
+        [[0]], [[1]], [1.0, 1.0], alpha=1.0, temperature=300.0, anchor=0,
+        center=("point", np.zeros(3)), threshold=0.01, scale=0.1)
+    energy, force = boundary.evaluate(xyz)
+    g, dg = pair_term(1.0, 2.7)
+    swapped = float(np.exp(-g))
+    assert 0.0048 < swapped < 0.0050
+    assert boundary.last["numerator"] == 1.0
+    assert abs(boundary.last["denominator"] - (1.0 + swapped)) < 1.0e-15
+    assert boundary.last["iterations"] == 2
+    kt = KB_HARTREE_PER_KELVIN*300.0
+    assert abs(energy - kt*np.log1p(swapped)) < 1.0e-18
+    expected = kt*float(dg)*swapped/(1.0 + swapped)
+    assert expected > 1.0e-6
+    assert abs(force[1, 0] - expected) < 1.0e-15
+    assert np.all(force[1, 1:] == 0.0) and np.all(force[0] == 0.0)
+    h = 1.0e-5
+    plus, minus = xyz.copy(), xyz.copy()
+    plus[1, 0] += h
+    minus[1, 0] -= h
+    fd = -(boundary.evaluate(plus)[0] - boundary.evaluate(minus)[0])/(2.0*h)
+    assert abs(fd - force[1, 0]) < 1.0e-6*expected
+
+
 def test_partition_explosion_is_refused_not_hidden():
     xyz = _cluster(19)
     boundary = _solute_boundary(xyz, nqm=8, swaps=1, alpha=0.05,

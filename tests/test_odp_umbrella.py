@@ -370,6 +370,34 @@ try:
 except RuntimeError as exc:
     refusal = str(exc)
 
+def image(vector, cell):
+    return vector - cell*np.round(vector/cell)
+
+# Atoms 2 and 7 are 11.6 bohr apart along x (more than half of 23) but no CV
+# uses that pair; each CV, measured along its own pairs 5-2 and 5-7, equals
+# the CV of the explicitly unwrapped coordinates.
+far_ends = whole.copy()
+far_ends[6] = whole[1] + np.array([11.6, 0.0, 0.0])
+unwrapped = far_ends.copy()
+unwrapped[1] = far_ends[4] + image(far_ends[1] - far_ends[4], box)
+unwrapped[6] = far_ends[4] + image(far_ends[6] - far_ends[4], box)
+far_ends_shifted = far_ends.copy()
+far_ends_shifted[1] += box*np.array([1, 0, -1])
+far_ends_shifted[6] += box*np.array([-2, 1, 0])
+far_ends_cv = float(np.max(np.abs(
+    odp.evaluate(far_ends_shifted, box=box)["cv_raw"]
+    - odp.evaluate(unwrapped)["cv_raw"])))
+
+# Two unconnected distances in a 10-bohr cube: each pair is imaged on its own
+# (imaging atom 4 against atom 1 put the 3-4 pair 9.6 bohr apart).
+apart = ODPUmbrella({"enabled": True, "cv": "distance(1,2); distance(3,4)",
+                     "scale": [1.0, 1.0], "reference_r": [1.0, 1.0],
+                     "reference_p": [2.0, 2.0], "center": 0.5,
+                     "k_parallel": 0.1})
+apart_cv = apart.evaluate(np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+                                    [4.9, 0.0, 0.0], [5.3, 0.0, 0.0]]),
+                          box=np.array([10.0, 10.0, 10.0]))["cv_raw"].tolist()
+
 class Driver:
     def __init__(self, cell):
         self.cell = cell
@@ -393,6 +421,7 @@ print("PBC=" + json.dumps({
     "max_energy": max_energy, "max_xi": max_xi, "max_force": max_force,
     "max_fd": max_fd, "refusal": refusal, "diagonal_ok": diagonal_ok,
     "angle_error": angle_error,
+    "far_ends_cv": far_ends_cv, "apart_cv": apart_cv,
     "namd_energy": energy - (-2.5 + direct["energy"]),
     "namd_force": float(np.max(np.abs(force - direct["force"]))),
     "namd_unbiased": namd._unbiased_potential_energy,
@@ -418,6 +447,9 @@ print("PBC=" + json.dumps({
     assert values["max_fd"] < 2.0e-8
     assert "not less than half the box length" in values["refusal"]
     assert values["angle_error"] < 1.0e-12
+    assert values["far_ends_cv"] < 1.0e-12
+    assert abs(values["apart_cv"][0] - 1.0) < 1.0e-12
+    assert abs(values["apart_cv"][1] - 0.4) < 1.0e-12
     # a diagonal pair separation of (0.4 L, 0.4 L, 0) has a unique minimum
     # image although its norm exceeds half the box
     assert values["diagonal_ok"] is True
