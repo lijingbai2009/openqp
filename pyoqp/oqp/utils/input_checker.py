@@ -6028,20 +6028,10 @@ def _check_runtype(config: dict[str, Any], report: CheckReport,
         report.add(
             "ERROR",
             "odp.enabled",
-            "ODP umbrella sampling currently requires the NVE NAMD workflow.",
+            "ODP umbrella sampling currently requires the NAMD workflow.",
             value=f"enabled=True/runtype={runtype}",
             expected="odp.enabled=False, or input.runtype=namd",
             action="Disable [odp] for this calculation or use runtype=namd.",
-        )
-    if (odp_enabled is True and runtype == "namd"
-            and _as_lower(_get(config, "md", "ensemble", "nve")) != "nve"):
-        report.add(
-            "ERROR",
-            "md.ensemble",
-            "ODP umbrella sampling currently supports NVE NAMD only.",
-            value=_get(config, "md", "ensemble", "nve"),
-            expected="nve",
-            action="Set [md] ensemble=nve when [odp] enabled=True.",
         )
 
     if runtype not in ALL_RUNTYPES:

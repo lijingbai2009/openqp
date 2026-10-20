@@ -2098,14 +2098,7 @@ def _validate_semantics(spec: CalculationSpec) -> None:
         if (driver.name != "namd"
                 and requested(odp_section.kwargs.get("enabled", False))):
             raise OQPInputError(
-                "odp(...) currently requires the NVE namd(...) workflow"
-            )
-        if (driver.name == "namd"
-                and requested(odp_section.kwargs.get("enabled", False))
-                and str(options.get("ensemble", "nve")).strip().lower()
-                != "nve"):
-            raise OQPInputError(
-                "odp(...) currently requires ensemble=nve in namd(...)"
+                "odp(...) currently requires the namd(...) workflow"
             )
     if states and set(_driver_options(driver)).intersection({"active", "init_state"}):
         key = sorted(set(_driver_options(driver)).intersection({"active", "init_state"}))[0]

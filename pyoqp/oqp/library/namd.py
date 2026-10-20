@@ -356,14 +356,6 @@ def _restart_manifest_path(log_path):
     return os.path.join(os.path.dirname(absolute), stem + '.namd.restart.oqp')
 
 
-def _validate_odp_boundary_conditions(odp, periodic):
-    """Reject periodic ODP until native CVs implement minimum images."""
-    if odp is not None and bool(periodic):
-        raise NotImplementedError(
-            "[odp] periodic QM/MM is unsupported because ODP CVs do not yet "
-            "apply the minimum-image convention; use qmmm.cutoff=NoCutoff")
-
-
 def _namd_trajectory_dtype(nstate, natom, ncv=0):
     """Fixed-width, appendable binary record used by ``*.namd.trj``."""
     matrix = (nstate, nstate)
@@ -982,11 +974,7 @@ class NAMD:
                     "rescale=auto or isotropic, or tighten the model." % model_issue)
         if soc_requested and self.odp is not None:
             raise NotImplementedError(
-                "[odp] currently supports same-spin NVE NAMD only"
-            )
-        if self.odp is not None and self.ensemble != 'nve':
-            raise NotImplementedError(
-                "[odp] currently supports same-spin NVE NAMD only"
+                "[odp] currently supports same-spin NAMD only"
             )
         if self.dt_adaptive and not soc_requested:
             raise NotImplementedError(
@@ -1703,11 +1691,15 @@ class NAMD:
             return {'enabled': False}
         return self.odp.provenance()
 
+    def _odp_box(self):
+        """Orthorhombic box lengths (bohr) for ODP CVs; None when nonperiodic."""
+        return None
+
     def _evaluate_odp(self, coordinates):
         if self.odp is None:
             self._odp_last = None
             return None
-        self._odp_last = self.odp.evaluate(coordinates)
+        self._odp_last = self.odp.evaluate(coordinates, box=self._odp_box())
         return self._odp_last
 
     def _prepare_md_outputs_on_io_rank(self):
@@ -5278,7 +5270,6 @@ class NAMD_QMMM(NAMD):
         self.cutoff = _resolve_cutoff(str(q['cutoff']).strip())   # NoCutoff | PME | Ewald | ...
         from oqp.library.qmmm_driver import is_periodic_method
         self.periodic = is_periodic_method(self.cutoff)   # PME / Ewald / CutoffPeriodic
-        _validate_odp_boundary_conditions(self.odp, self.periodic)
         embedding = str(q['embedding']).strip()
         frontier_scheme = str(q.get('frontier_scheme', 'none')).strip()
         _et = q.get('ewald_tol', None)
@@ -5845,6 +5836,12 @@ class NAMD_QMMM(NAMD):
                 f"atoms: molecule Z={z_mol.astype(int).tolist()}, expected "
                 f"{z_expected}. Note '[input] system = file.pdb ...' indices are "
                 "1-based while [qmmm] qm_atoms are 0-based.")
+
+    def _odp_box(self):
+        """The periodic cell for ODP CVs on the full-system coordinates:
+        r_all is never wrapped, but the input may place a CV atom one cell
+        away from its partners, so each CV is taken at its minimum image."""
+        return self.driver._box_lengths_bohr()       # None for a cluster
 
     def _qm_positions_bohr(self):
         """(natom, 3) QM-centre coordinates (bohr): real QM atoms in topology

@@ -165,14 +165,52 @@ class ODPUmbrella:
                 f"[odp] CV atom {largest} is outside the {natom}-atom MD system"
             )
 
-    def evaluate(self, coordinates):
-        """Return native bias energy, force, CVs, and projection diagnostics."""
+    def minimum_image_coordinates(self, coordinates, box):
+        """Place the CV atoms of a periodic cell at one consistent image.
+
+        Every CV atom is moved by a lattice vector to the minimum image of the
+        first CV atom.  The native kernel then measures each CV from these
+        Cartesian positions, which equals the minimum-image CV only when every
+        pair of CV atoms is closer than half the shortest orthorhombic box
+        length after this placement; otherwise a CV would be measured across
+        the wrong image and the evaluation is refused.  A lattice translation
+        does not change a force, so the returned force applies to the raw
+        atoms unchanged.
+        """
+        xyz = np.array(coordinates, dtype=np.float64, copy=True)
+        box = np.asarray(box, dtype=np.float64).reshape(-1)
+        if box.size != 3 or not np.all(np.isfinite(box)) or np.any(box <= 0.0):
+            raise ValueError("[odp] periodic box lengths must be three positive values")
+        used = np.unique(self.cv_atoms[self.cv_atoms >= 0])
+        reference = xyz[used[0]].copy()
+        shifted = xyz[used] - reference
+        shifted -= box*np.round(shifted/box)
+        xyz[used] = reference + shifted
+        pairs = shifted[:, None, :] - shifted[None, :, :]
+        separation = float(np.max(np.linalg.norm(pairs, axis=-1)))
+        half = 0.5*float(np.min(box))
+        if separation >= half:
+            raise RuntimeError(
+                f"[odp] CV atoms span {separation:.6g} bohr, not less than half "
+                f"the shortest box length ({half:.6g} bohr); the minimum image "
+                "of each CV is ambiguous. Enlarge the cell or choose CV atoms "
+                "that stay together.")
+        return xyz
+
+    def evaluate(self, coordinates, box=None):
+        """Return native bias energy, force, CVs, and projection diagnostics.
+
+        ``box`` gives orthorhombic periodic box lengths in the units of
+        ``coordinates`` (bohr); ``None`` means a nonperiodic system.
+        """
         xyz = np.ascontiguousarray(coordinates, dtype=np.float64)
         if xyz.ndim != 2 or xyz.shape[1] != 3:
             raise ValueError("ODP coordinates must have shape (natom, 3)")
         self.validate_atom_count(len(xyz))
         if not np.all(np.isfinite(xyz)):
             raise RuntimeError("ODP refused non-finite MD coordinates")
+        if box is not None:
+            xyz = np.ascontiguousarray(self.minimum_image_coordinates(xyz, box))
         energy = np.zeros(1, dtype=np.float64)
         force = np.zeros_like(xyz)
         xi = np.zeros(1, dtype=np.float64)
