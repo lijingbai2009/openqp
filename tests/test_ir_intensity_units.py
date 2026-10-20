@@ -9,6 +9,10 @@ both the kernel and pyoqp/oqp/library/frequency.py used 42.255, the factor for
 (Debye/Angstrom)^2/amu, so every "IR(km/mol)" value in the log, hess.json and
 freq.molden was 23.07 times too small.
 
+Raman activities 45 abar'^2 + 7 gamma'^2 are formed from polarizability
+derivatives in bohr^3 per sqrt(amu)*bohr, so they are in bohr^4/amu (multiply
+by 0.078415 for Angstrom^4/amu); the label was 'a.u.' until 2026-10-20.
+
 The end-to-end test compares water RHF/6-31G with an independent PySCF 2.14
 calculation at the same (PySCF-optimized) geometry and with the same isotope
 masses: analytic PySCF Hessian; dipole derivatives by central differences
@@ -80,6 +84,10 @@ def test_water_rhf_ir_raman_match_pyscf(tmp_path):
     data = json.loads((tmp_path / "h2o_ir.hess.json").read_text(encoding="utf-8"))
     assert data["vibrational_intensity_metadata"]["status"] == "computed"
     assert data["vibrational_intensity_metadata"]["backend"] == "native_openqp_analytic"
+    assert data["vibrational_intensity_metadata"]["ir_units"] == "km/mol"
+    assert data["vibrational_intensity_metadata"]["raman_units"] == "bohr^4/amu"
+    assert "IR(km/mol)      Raman(bohr^4/amu)" in (tmp_path / "h2o_ir.log").read_text(
+        encoding="utf-8", errors="replace")
     freqs = np.asarray(data["freqs"], dtype=float)
     order = np.argsort(freqs)
     freqs = freqs[order]
