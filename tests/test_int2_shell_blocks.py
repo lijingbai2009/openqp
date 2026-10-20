@@ -13,13 +13,26 @@ class ShellBlockContractions(unittest.TestCase):
         # Exercise the driver's final layout resolution, both cutoffs and
         # 1/2/4 thread images, plus the forced direct/mixed, CAM and FP32 cases.
         # The native check asserts the expected configuration for every kind.
+        # The last 16 checks pin zero-scaled J/K digestion (RHF and UROHF;
+        # legacy update and forced shell consume_shell; replicated and atomic
+        # accumulators; one and four images) by linearity against the full path.
         for layout in (None, "legacy", "shell", "unknown", "x" * 17):
             with self.subTest(layout=layout), patch.dict(os.environ):
                 if layout is None:
                     os.environ.pop("OQP_INT2_LAYOUT", None)
                 else:
                     os.environ["OQP_INT2_LAYOUT"] = layout
-                self._check("int2_shell_block_selftest", 44000)
+                self._check("int2_shell_block_selftest", 44016)
+
+    def test_zero_scale_checks_under_forced_accumulator_mode(self):
+        # parallel_start sizes the Fock accumulator from OQP_FOCK_ATOMIC; the
+        # zero-scale checks then select each mode themselves and must resize
+        # the accumulator to match (one shared copy vs one per image).
+        for atomic in ("0", "1"):
+            with self.subTest(OQP_FOCK_ATOMIC=atomic), patch.dict(os.environ):
+                os.environ.pop("OQP_INT2_LAYOUT", None)
+                os.environ["OQP_FOCK_ATOMIC"] = atomic
+                self._check("int2_shell_block_selftest", 44016)
 
     def _check(self, symbol, expected_count):
         try:
