@@ -217,6 +217,24 @@ def test_collected_partition_sum_approaches_the_exhaustive_sum(alpha, tolerance)
         assert math.log(exhaustive/collected) < tolerance
 
 
+def test_threshold_is_lowered_even_when_the_first_sum_is_one():
+    """One partition just below the initial threshold must still count."""
+    import math
+
+    boundary = FlexiBLEBoundary(
+        [[0]], [[1]], np.ones(2), alpha=1.0, temperature=300.0, anchor=0,
+        center=("point", np.zeros(3)), threshold=0.01, scale=0.1)
+    xyz = np.array([[0.5, 0.0, 0.0], [3.2, 0.0, 0.0]])     # r = 0.5 and 3.2
+    energy, force = boundary.evaluate(xyz)
+    gap = 3.2 - 0.5
+    swapped = math.exp(-(gap**3)/(1.0 + gap))            # about 0.0049
+    assert 0.001 < swapped < 0.01
+    assert abs(boundary.last["denominator"] - (1.0 + swapped)) < 1.0e-14
+    kt = KB_HARTREE_PER_KELVIN*300.0
+    assert abs(energy - kt*math.log(1.0 + swapped)) < 1.0e-16
+    assert np.max(np.abs(force)) > 0.0
+
+
 def test_partition_explosion_is_refused_not_hidden():
     xyz = _cluster(19)
     boundary = _solute_boundary(xyz, nqm=8, swaps=1, alpha=0.05,

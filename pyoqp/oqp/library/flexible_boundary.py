@@ -23,8 +23,10 @@ are collected as in the authors' OpenMM reference kernel
 ordered partition of the boundary window, a QM label moves one rank outwards
 while the term stays above a threshold, and the threshold is lowered by a
 fixed factor until the sum changes by no more than the initial threshold
-relative to its previous value.  The force is the exact derivative of the
-collected sum.
+relative to its previous value.  Unlike the reference kernel, the threshold
+is lowered at least once even when the first sum is exactly 1, so a partition
+just below the initial threshold is not dropped.  The force is the exact
+derivative of the collected sum.
 
 This module is an independent implementation in atomic units.  Periodic
 cells are handled with the minimum-image anchor-to-centre vector, which the
@@ -285,10 +287,11 @@ class FlexiBLEBoundary:
         for iteration in range(1, self.max_iterations + 1):
             denominator, d_denominator = self._denominator(r, order, weights, h)
             if previous is None:
+                # The reference kernel stops here when the sum is exactly 1.
+                # A partition just below the initial threshold would then be
+                # dropped, so the threshold is always lowered at least once.
                 previous = denominator
                 h *= self.scale
-                if denominator == 1.0:
-                    break
                 continue
             if denominator - previous > gamma*previous:
                 h *= self.scale
