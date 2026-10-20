@@ -1030,6 +1030,91 @@ class SOCExampleReferenceTests(unittest.TestCase):
         self.assertRegex(text, r'(?m)^\s*soc\s*=\s*true\s*$')
 
 
+@unittest.skipUnless(_oqp_available(), "OpenQP shared library is not built")
+class SOCRouteEquivalenceTests(unittest.TestCase):
+    """prop(soc=true) and data(soc=true) couple the same two ladders as
+    standalone runtype=soc.
+
+    The two routes solve the ladders in different orders (the properties flow
+    solves the other ladder first and aligns phases before recording), so the
+    comparison uses phase-invariant quantities: both ladders' excitation
+    energies, the adiabatic SOC eigenvalues, |H_SOC| element by element and
+    the Absolute column of socme.  A coupling built from a mis-recorded or
+    mis-ordered ladder changes all of them.
+    """
+
+    DECK = ('mrsf(nstate=3)/bhhlyp/6-31g ispher=false {driver} '
+            'properties({properties})\ngeom="h2o.xyz"\n')
+    # prop overlaps with a previous step; back_door without one uses the
+    # current geometry, as the shipped prop example does.
+    ROUTES = (('soc', 'soc', 'export=true'),
+              ('prop', 'prop(soc=true)', 'export=true,back_door=true'),
+              ('data', 'data(soc=true)', 'export=true'))
+    GEOMETRY = ('3\nH2O\nO 0.000000000 0.000000000 -0.041061554\n'
+                'H -0.533194329 0.533194329 -0.614469223\n'
+                'H 0.533194329 -0.533194329 -0.614469223\n')
+
+    @classmethod
+    def setUpClass(cls):
+        from oqp.pyoqp import Runner
+
+        cls._tmp = tempfile.TemporaryDirectory(prefix='soc_routes_')
+        cls.results = {}
+        for name, driver, properties in cls.ROUTES:
+            folder = Path(cls._tmp.name) / name
+            folder.mkdir()
+            (folder / 'h2o.xyz').write_text(cls.GEOMETRY, encoding='utf-8')
+            deck = folder / f'{name}.oqp'
+            deck.write_text(cls.DECK.format(driver=driver, properties=properties),
+                            encoding='utf-8')
+            runner = Runner(input_file=str(deck), log=str(folder / f'{name}.log'),
+                            silent=1, usempi=False)
+            runner.run()
+            data = runner.mol.get_data()
+            cls.results[name] = {
+                key: np.array(data[key], dtype=float, copy=True)
+                for key in ('OQP::td_singlet_energies', 'OQP::td_triplet_energies',
+                            'OQP::soc_eval', 'OQP::soc_hsoc_re', 'OQP::soc_hsoc_im')
+            }
+            cls.results[name]['socme'] = np.loadtxt(folder / 'socme', ndmin=2)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_both_ladders_are_the_same(self):
+        for key in ('OQP::td_singlet_energies', 'OQP::td_triplet_energies'):
+            standalone = self.results['soc'][key]
+            self.assertEqual(standalone.shape, (3,), key)
+            for route in ('prop', 'data'):
+                np.testing.assert_allclose(self.results[route][key], standalone,
+                                           rtol=0, atol=1e-8, err_msg=f'{route} {key}')
+
+    def test_the_spin_orbit_eigenvalues_are_the_same(self):
+        standalone = self.results['soc']['OQP::soc_eval']
+        self.assertEqual(standalone.size, 3 + 3 * 3)
+        for route in ('prop', 'data'):
+            # cm-1; 1e-3 cm-1 is 4.6e-9 Eh
+            np.testing.assert_allclose(self.results[route]['OQP::soc_eval'], standalone,
+                                       rtol=0, atol=1e-3, err_msg=route)
+
+    def test_the_coupling_magnitudes_are_the_same(self):
+        magnitude = {
+            name: np.hypot(result['OQP::soc_hsoc_re'], result['OQP::soc_hsoc_im'])
+            for name, result in self.results.items()
+        }
+        self.assertGreater(magnitude['soc'].max(), 1e-6, 'no coupling to compare')
+        standalone = self.results['soc']['socme']
+        self.assertEqual(standalone.shape, (3 * 3 * 3, 6))
+        for route in ('prop', 'data'):
+            np.testing.assert_allclose(magnitude[route], magnitude['soc'],
+                                       rtol=0, atol=1e-8, err_msg=route)
+            socme = self.results[route]['socme']
+            np.testing.assert_array_equal(socme[:, :3], standalone[:, :3])
+            np.testing.assert_allclose(socme[:, 5], standalone[:, 5],
+                                       rtol=0, atol=1e-5, err_msg=route)
+
+
 class _HistoryData(dict):
     """OQPData stand-in: a missing tag raises AttributeError like the real one."""
 
