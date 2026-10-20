@@ -178,35 +178,53 @@ class ODPUmbrella:
         return pairs
 
     def minimum_image_coordinates(self, coordinates, box):
-        """Place the CV atoms of a periodic cell at one consistent image.
+        """Place the CV atoms of a periodic cell at consistent images.
 
-        Every CV atom is moved by a lattice vector to the minimum image of the
-        first CV atom.  The native kernel then measures each CV from these
-        Cartesian positions.  That equals the minimum-image CV only when every
-        atom pair a CV uses is itself at its minimum image after this
-        placement, i.e. each Cartesian component of the pair separation is
-        shorter than half the box length along that axis; otherwise the
-        evaluation is refused.  A lattice translation does not change a
-        force, so the returned force applies to the raw atoms unchanged.
+        The atom pairs whose separation vectors the CVs use form a graph.
+        Each connected part is unwrapped along a spanning tree: an atom is
+        placed at the minimum image of the atom it is joined to by a CV, so an
+        angle is unwrapped about its vertex and unrelated CVs do not constrain
+        each other.  The native kernel then measures each CV from these
+        Cartesian positions, which equals the minimum-image CV only when every
+        used pair is itself at its minimum image, i.e. each Cartesian
+        component of its separation is shorter than half the box length along
+        that axis; otherwise (a closed loop of CV pairs that the box cannot
+        accommodate) the evaluation is refused.  A lattice translation does
+        not change a force, so the returned force applies to the raw atoms.
         """
         xyz = np.array(coordinates, dtype=np.float64, copy=True)
         box = np.asarray(box, dtype=np.float64).reshape(-1)
         if box.size != 3 or not np.all(np.isfinite(box)) or np.any(box <= 0.0):
             raise ValueError("[odp] periodic box lengths must be three positive values")
-        used = np.unique(self.cv_atoms[self.cv_atoms >= 0])
-        reference = xyz[used[0]].copy()
-        shifted = xyz[used] - reference
-        shifted -= box*np.round(shifted/box)
-        xyz[used] = reference + shifted
-        for i, j in self._cv_pairs():
+        pairs = self._cv_pairs()
+        neighbours = {}
+        for i, j in pairs:
+            neighbours.setdefault(int(i), []).append(int(j))
+            neighbours.setdefault(int(j), []).append(int(i))
+        placed = set()
+        for root in sorted(neighbours):
+            if root in placed:
+                continue
+            placed.add(root)
+            stack = [root]
+            while stack:
+                atom = stack.pop()
+                for other in neighbours[atom]:
+                    if other in placed:
+                        continue
+                    step = xyz[other] - xyz[atom]
+                    xyz[other] = xyz[atom] + step - box*np.round(step/box)
+                    placed.add(other)
+                    stack.append(other)
+        for i, j in pairs:
             component = np.abs(xyz[j] - xyz[i])
             if np.any(component >= 0.5*box):
                 axis = int(np.argmax(component/box))
                 raise RuntimeError(
                     f"[odp] CV atoms {i + 1} and {j + 1} are {component[axis]:.6g} "
                     f"bohr apart along axis {'xyz'[axis]}, not less than half the "
-                    f"box length ({0.5*box[axis]:.6g} bohr) once all CV atoms are "
-                    "placed at one image; the minimum image of the CV is "
+                    f"box length ({0.5*box[axis]:.6g} bohr) once the CV atoms are "
+                    "unwrapped along the CVs; the minimum image of the CV is "
                     "ambiguous. Enlarge the cell or choose CV atoms that stay "
                     "together.")
         return xyz

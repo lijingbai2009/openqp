@@ -253,6 +253,11 @@ def test_invalid_settings_and_hopeless_partition_are_rejected():
     with pytest.raises(ValueError, match="anchor"):
         FlexiBLEBoundary([[0, 1, 2]], [[3, 4, 5]], masses, alpha=1.0,
                          temperature=300.0, anchor=3)
+    # a massless (virtual-site) anchor would receive the whole force
+    with pytest.raises(ValueError, match="must carry mass"):
+        FlexiBLEBoundary([[0, 1, 2]], [[3, 4, 5]],
+                         np.array([16.0, 1.0, 0.0, 16.0, 1.0, 0.0]),
+                         alpha=1.0, temperature=300.0, anchor=2)
     # the QM molecule far outside the MM one: h(actual) underflows
     boundary = FlexiBLEBoundary(
         [[0, 1, 2]], [[3, 4, 5]], masses, alpha=5.0, temperature=300.0,
@@ -495,3 +500,14 @@ def test_flexible_boundary_and_odp_window_example_runs_together(tmp_path):
     assert min(values["restraint"]) > 1.0e-6
     assert min(values["bias"]) > 1.0e-6
     assert values["wham_warning"] is None
+
+
+def test_soc_namd_refuses_flexible_because_its_force_paths_skip_restraints():
+    """NAMD_SOC_QMMM / NAMD_SOC_MCH_QMMM never call the conservative
+    restraints, so [flexible] must be refused there like droplet/solute_com."""
+    source = (ROOT / "pyoqp" / "oqp" / "library" / "namd.py").read_text()
+    guard = source[source.index("if soc_requested and (self.droplet_enabled"):]
+    guard = guard[:guard.index("raise NotImplementedError")]
+    assert "self.flexible_enabled" in guard
+    soc = source[source.index("class NAMD_SOC_QMMM"):]
+    assert "_evaluate_conservative_restraints" not in soc

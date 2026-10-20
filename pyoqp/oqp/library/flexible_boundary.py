@@ -86,6 +86,15 @@ class FlexiBLEBoundary:
             anchor = int(anchor)
             if not 0 <= anchor < sizes.pop():
                 raise ValueError("FlexiBLE anchor is outside the molecule")
+            # the integrator divides the force by the mass; a massless
+            # (virtual-site) anchor would receive the whole boundary force
+            anchor_masses = masses[[int(m[anchor]) for m in self.molecules]]
+            if np.any(anchor_masses <= 0.0):
+                raise ValueError(
+                    "FlexiBLE anchor atom must carry mass; a massless virtual "
+                    "site cannot be the anchor (use a real atom or com)")
+        elif any(np.sum(masses[m]) <= 0.0 for m in self.molecules):
+            raise ValueError("FlexiBLE molecule without mass")
         self.anchor = anchor
         self.alpha = float(alpha)
         self.temperature = float(temperature)

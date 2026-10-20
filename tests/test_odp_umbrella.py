@@ -341,11 +341,32 @@ try:
 except RuntimeError:
     diagonal_ok = False
 
-too_wide = whole.copy()
-too_wide[6] = whole[1] + np.array([11.6, 0.0, 0.0])
+# the reviewer's angle: two 4.9-bohr arms about vertex 2 in a 10-bohr cell;
+# imaging atom 3 against atom 1 would make the second arm 5.1 bohr
+angle = ODPUmbrella({
+    "enabled": True, "cv": "angle(1,2,3)", "scale": [1.0],
+    "reference_r": [1.0], "reference_p": [2.0], "center": 0.5,
+    "k_parallel": 0.1, "k_perpendicular": 0.0})
+small = np.array([10.0, 10.0, 10.0])
+wrapped_angle = np.array([[0.0, 0.0, 0.0], [4.9, 1.0, 0.0], [-0.2, 2.5, 0.7]])
+unwrapped_angle = wrapped_angle.copy()
+unwrapped_angle[2, 0] += 10.0
+angle_periodic = angle.evaluate(wrapped_angle, box=small)
+angle_reference = angle.evaluate(unwrapped_angle)
+angle_error = abs(angle_periodic["energy"] - angle_reference["energy"]) + float(
+    np.max(np.abs(angle_periodic["force"] - angle_reference["force"])))
+
+# a closed triangle of distance CVs that no image assignment satisfies:
+# 1-2 and 2-3 are 0.45 L each along x, so 1-3 cannot also be a minimum image
+triangle = ODPUmbrella({
+    "enabled": True, "cv": "distance(1,2); distance(2,3); distance(1,3)",
+    "scale": [1.0, 1.0, 1.0], "reference_r": [1.0, 1.0, 1.0],
+    "reference_p": [2.0, 2.0, 2.0], "center": 0.5, "k_parallel": 0.1,
+    "k_perpendicular": 0.0})
+loop = np.array([[0.0, 0.0, 0.0], [0.45*23.0, 0.3, 0.0], [0.9*23.0, 0.0, 0.4]])
 refusal = None
 try:
-    odp.evaluate(too_wide, box=box)
+    triangle.evaluate(loop, box=np.array([23.0, 23.0, 23.0]))
 except RuntimeError as exc:
     refusal = str(exc)
 
@@ -371,6 +392,7 @@ raw = odp.evaluate(wrapped)
 print("PBC=" + json.dumps({
     "max_energy": max_energy, "max_xi": max_xi, "max_force": max_force,
     "max_fd": max_fd, "refusal": refusal, "diagonal_ok": diagonal_ok,
+    "angle_error": angle_error,
     "namd_energy": energy - (-2.5 + direct["energy"]),
     "namd_force": float(np.max(np.abs(force - direct["force"]))),
     "namd_unbiased": namd._unbiased_potential_energy,
@@ -395,6 +417,7 @@ print("PBC=" + json.dumps({
     assert values["max_force"] < 1.0e-12
     assert values["max_fd"] < 2.0e-8
     assert "not less than half the box length" in values["refusal"]
+    assert values["angle_error"] < 1.0e-12
     # a diagonal pair separation of (0.4 L, 0.4 L, 0) has a unique minimum
     # image although its norm exceeds half the box
     assert values["diagonal_ok"] is True

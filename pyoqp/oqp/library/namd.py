@@ -1000,9 +1000,11 @@ class NAMD:
         self._wham_system_identity = self._qm_wham_system_identity()
         self._init_independent_controls(cfg)
         if soc_requested and (self.droplet_enabled or self.solute_com_enabled
+                              or self.flexible_enabled
                               or self.thermostat != 'off'):
             raise NotImplementedError(
-                "droplet/solute_com/NVT controls currently support same-spin NAMD only"
+                "droplet/solute_com/flexible/NVT controls currently support "
+                "same-spin NAMD only"
             )
         if (self.droplet_enabled or self.solute_com_enabled) and not self._as_bool(
                 cfg.get('input', {}).get('qmmm_flag', False)):

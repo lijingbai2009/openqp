@@ -20,9 +20,10 @@ temperature. An NVE window is still accepted, but OpenQP records the ensemble
 and warns that WHAM assumes canonical sampling.
 
 ODP also runs in periodic QM/MM (`qmmm(cutoff=PME)`, orthorhombic cell). Each
-CV is measured at its minimum image: all CV atoms are placed at the image
-nearest the first CV atom, and the run stops if an atom pair used by a CV is
-then not closer than half the box length along some axis.
+CV is measured at its minimum image: the CV atoms are unwrapped along the atom
+pairs the CVs use (an angle about its vertex), and the run stops only if such a
+pair is then not closer than half the box length along some axis, which
+happens for a closed loop of CVs that the cell cannot accommodate.
 
 To exercise checkpoint continuation end to end, run:
 
