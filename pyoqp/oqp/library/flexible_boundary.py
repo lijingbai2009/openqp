@@ -285,9 +285,12 @@ class FlexiBLEBoundary:
                 "FlexiBLE: a QM molecule is not closer to the centre than "
                 "half the shortest box length; the boundary would reach its "
                 f"own periodic image (QM molecule {far}, r = {r[far]:.6g} bohr)")
+        # an anchor exactly on the centre has no radial direction: it gets
+        # no force, but its distance stays 0 in the energy (the reference
+        # kernel replaces it by 1e-8)
         zero = r <= 0.0
-        r = np.where(zero, 1.0e-8, r)
-        units = np.where(zero[:, None], 0.0, vectors/r[:, None])
+        units = np.where(zero[:, None], 0.0,
+                         vectors/np.where(zero, 1.0, r)[:, None])
 
         numerator, d_numerator = self._numerator(r)
         if numerator < 1.0e-14:
