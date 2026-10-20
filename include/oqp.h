@@ -813,6 +813,7 @@ void mrsf_xc_sweep_selftest(struct oqp_handle_t *inf, double *error, double *mov
 void umrsf_bra_reuse_selftest(double *error, int *checks);
 void umrsf_pair_selftest(double *error, int *checks, int *failures);
 void mrsf_spin_square_selftest(double *error, int *checks);
+void davidson_orthogonalization_selftest(double *error, int *checks, int *failures);
 void mrsf_spin_square_evaluate(int n, int nc, int mult, const double *mo_a,
                                const double *mo_b, const double *smat, const double *x, double *ss);
 void tdhf_mrsf_ekt_ip(struct oqp_handle_t *inf);

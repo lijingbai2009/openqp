@@ -447,7 +447,9 @@ OQP_CONFIG_SCHEMA = {
         'rad_npts': {'type': int, 'default': '96'},
         'ang_npts': {'type': int, 'default': '302'},
         'partfun': {'type': string, 'default': 'ssf'},
-        'pruned': {'type': string, 'default': 'SG2'},
+        # 'auto' resolves in resolve_dftgrid_pruned(): SG2 while rad_npts and
+        # ang_npts keep their defaults, else the unpruned rad_npts x ang_npts grid.
+        'pruned': {'type': string, 'default': 'auto'},
         'grid_ao_pruned': {'type': bool, 'default': 'True'},
         'grid_ao_threshold': {'type': float, 'default': '1.0e-15'},
         'grid_ao_sparsity_ratio': {'type': float, 'default': '0.9'},
@@ -946,6 +948,39 @@ OQP_CONFIG_SCHEMA = {
     },
 }
 
+# Pruned DFT grid presets understood by dft_set_options (source/dftlib/dft.F90).
+DFTGRID_PRESETS = ('SG0', 'SG1', 'SG2', 'SG3')
+# Preset that pruned=auto selects when the grid size is left at its default.
+DFTGRID_AUTO_PRESET = 'SG2'
+# Spellings of the unpruned rad_npts x ang_npts grid.
+DFTGRID_UNPRUNED_SPELLINGS = frozenset({'', 'none', 'off', 'false', 'no'})
+
+
+def resolve_dftgrid_pruned(dftgrid):
+    """Return the grid that a [dftgrid] section selects: a preset name or 'none'.
+
+    A pruned preset (SG0-SG3) defines its own radial and angular grids, so
+    dft_set_options never reads rad_npts / ang_npts for the atoms it covers.
+    With a fixed preset default, an input that set only rad_npts / ang_npts was
+    therefore silently run on the preset grid.  The default is now ``auto``:
+    the SG2 preset while rad_npts and ang_npts keep their schema defaults, and
+    the unpruned rad_npts x ang_npts grid as soon as either is changed.  An
+    explicit preset or an explicit unpruned spelling is returned unchanged.
+    """
+    raw = dftgrid.get('pruned', 'auto')
+    value = '' if raw is None else str(raw).strip()
+    if value.lower() in DFTGRID_UNPRUNED_SPELLINGS:
+        return 'none'
+    if value.lower() != 'auto':
+        return value.upper()
+    schema = OQP_CONFIG_SCHEMA['dftgrid']
+    sizes_are_default = all(
+        int(dftgrid.get(key, schema[key]['default'])) == int(schema[key]['default'])
+        for key in ('rad_npts', 'ang_npts')
+    )
+    return DFTGRID_AUTO_PRESET if sizes_are_default else 'none'
+
+
 TA_DIMENSIONS_LENGTH = 12
 
 
@@ -1194,20 +1229,20 @@ class OQPData:
     def __setitem__(self, key, value):
         """Set data in molecule"""
 
-        if key in dir(self._data.mol_prop):
-            self._data.mol_prop[key] = value
-
-        if key in dir(self._data.mol_energy):
-            self._data.mol_energy[key] = value
-
-        if key in dir(self._data.mpiinfo):
-            setattr(self._data.mpiinfo, key, value)
-
-        if key in dir(self._data.tddft):
-            setattr(self._data.tddft, key, value)
-
-        if key in dir(self._data.elshell):
-            setattr(self._data.elshell, key, value)
+        # A key naming a member of a native parameter struct is written to
+        # that member (to every struct that has it, e.g. ``debug_mode`` in
+        # tddft and mpiinfo) and is NOT also stored as a tag: the value is
+        # then a struct scalar such as a bool, which tagarray cannot store,
+        # and the tag would be unreadable anyway because __getitem__ resolves
+        # struct members first.
+        assigned = False
+        for struct in (self._data.mol_prop, self._data.mol_energy,
+                       self._data.mpiinfo, self._data.tddft,
+                       self._data.elshell):
+            if key in dir(struct):
+                setattr(struct, key, value)
+                assigned = True
+        if assigned:
             return
 
         if isinstance(value, np.ndarray):
@@ -1222,11 +1257,18 @@ class OQPData:
         else:
             _value = np.array(value)
 
+        # A tag write that cannot be stored must fail loudly: the caller
+        # (SCF-state restore, petite flag, ...) would otherwise continue
+        # with the previous contents of the tag.
         try:
             typeid = self.typemap.index(_value.dtype)
-            self._setitem_internal(key, _value, typeid)
-        except:
-            print(f"The type of your data is not allowed: {_value.dtype.name}")
+        except ValueError:
+            raise TypeError(
+                f"OQP data tag `{key}` cannot store dtype {_value.dtype.str!r}; "
+                "cast to one of the supported tagarray types "
+                "(int8..int64, uint8..uint64, float32, float64, "
+                "complex64, complex128, S1)") from None
+        self._setitem_internal(key, _value, typeid)
 
     def _setitem_internal(self, key, value, typeid):
         code = bytes(key, 'ascii')
@@ -1237,8 +1279,16 @@ class OQPData:
         ndims = ffi.new('int32_t *', len(np.shape(value)))
         data_ptr = ffi.new('void **')
         data_size = lib.oqp_alloc(self._data, req, type_id, ndims, dims, data_ptr)
+        if data_size == -1:
+            raise RuntimeError(f"Cannot store OQP data tag `{key}`: handle not initialized")
+        if data_size == -3:
+            raise ValueError(
+                f"Cannot store OQP data tag `{key}`: tagarray refused to create "
+                "the record (invalid tag or record conflict)")
         if data_size < 0:
-            raise AttributeError("Cannot allocate memory to store object in QOP data")
+            raise MemoryError(
+                f"Cannot allocate OQP data tag `{key}` with shape {shape} "
+                f"(oqp_alloc returned {data_size})")
 
         elem_size = np.dtype(self.typemap[typeid]).itemsize
         ffi.memmove(data_ptr[0], value, data_size * elem_size)
@@ -1835,16 +1885,24 @@ class OQPData:
         self._data.dft.dft_partfun = OQPData._dftgrid_partition_functions[partfun]
 
     def set_dftgrid_pruned(self, pruned):
-        """Set pruned grid"""
-        pruned_list = ['SG0', 'SG1', 'SG2', 'SG3']
+        """Set the pruned grid preset, or the unpruned rad_npts x ang_npts grid.
+
+        ``pruned`` must already be resolved by resolve_dftgrid_pruned();
+        apply_config does that, because ``auto`` depends on rad_npts/ang_npts.
+        """
         # "", none, off, false, no: use the unpruned (rad_npts x ang_npts) grid.
-        if pruned.strip().lower() not in ("", "none", "off", "false", "no"):
-            pruned = pruned.upper()
-            if pruned in pruned_list:
-                self._data.dft.grid_pruned = True
-                self._data.dft.grid_pruned_name = pruned.ljust(16)[:16].upper().encode("ascii")
-            else:
-                print(f"{pruned} grid is not valid. Available options are: {', '.join(pruned_list)}")
+        if pruned.strip().lower() in DFTGRID_UNPRUNED_SPELLINGS:
+            # Reset explicitly: a Molecule that is re-configured (MD, NAMD,
+            # API set()) must not keep the preset of an earlier configuration.
+            self._data.dft.grid_pruned = False
+            self._data.dft.grid_pruned_name = b"".ljust(16)
+            return
+        pruned = pruned.upper()
+        if pruned in DFTGRID_PRESETS:
+            self._data.dft.grid_pruned = True
+            self._data.dft.grid_pruned_name = pruned.ljust(16)[:16].upper().encode("ascii")
+        else:
+            print(f"{pruned} grid is not valid. Available options are: {', '.join(DFTGRID_PRESETS)}")
 
     def set_dftgrid_hfscale(self, hfscale):
         """Set HF exact exchange scalar in DFT calculation"""
@@ -1903,6 +1961,10 @@ class OQPData:
         The latter has to be read from the input file
         """
         lib.oqp_set_harmonic_active(ispher_mode(config['input'].get('ispher', 'auto')) != 'false')
+        if 'dftgrid' in config:
+            # Record the grid that will actually run, so the native setter, the
+            # printed/saved configuration and every later reader agree.
+            config['dftgrid']['pruned'] = resolve_dftgrid_pruned(config['dftgrid'])
         for section in config:
             self.parse_section(config, section)
 

@@ -368,7 +368,10 @@ contains
       if (nvec==mxvec) ierr = 1
       if (ierr/=0) exit
 
-      call rpanewb(nstates,bvec_mo,scr3,novec,nvec,ierr,tamm_dancoff=.true.)
+!     Corrections of roots that already meet cnvtol are optional: they
+!     refine the subspace only while slots remain (see rpanewb).
+      call rpanewb(nstates,bvec_mo,scr3,novec,nvec,ierr,tamm_dancoff=.true., &
+                   optional_candidate=rnorm(1:nstates)<=cnvtol)
 
   !   ierr=1 nvec over mxvec: not converged case
       if (ierr/=0) exit
