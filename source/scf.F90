@@ -1456,12 +1456,14 @@ contains
           else
             call pfon%build_density(pdmat(:,1), mo_a, work1, work2, do_pfon)
           end if
-          pfon_density_cold = pfon%temp <= 1.0_dp + 1.0e-6_dp
         else
           call build_scf_density(pdmat, mo_a, mo_b, infos, basis)
         end if
       end if
       call int2_driver%pe%bcast(pdmat, size(pdmat))
+      ! Every MPI rank makes the convergence decision.  The density is built
+      ! on rank 0, but the temperature is advanced identically on all ranks.
+      if (do_pfon) pfon_density_cold = pfon%temp <= 1.0_dp + 1.0e-6_dp
 
       !----------------------------------------------------------------------------
       ! Check HOMO-LUMO Gap for Convergence Prediction
