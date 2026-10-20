@@ -1,8 +1,10 @@
 # ODP umbrella sampling and WHAM
 
-`H2CO_BHHLYP-MRSF-NAMD-ODP.inp` is a minimal native ODP umbrella window. For a
-production PMF, copy it into several windows, assign a unique `window` and
-`center` in `[odp]`, and give each run its own packed `trajectory_file`.
+`H2CO_BHHLYP-MRSF-NAMD-ODP.oqp` is a minimal native ODP umbrella window (NVE)
+and `H2CO_BHHLYP-MRSF-NAMD-ODP-NVT.oqp` the same window sampled canonically.
+For a production PMF, copy one into several windows, give each a unique
+`window` and `center` in `odp(...)`, and give each run its own packed
+`trajectory_file` in `namd(...)`.
 
 Analyze all windows with the public Python API example:
 
