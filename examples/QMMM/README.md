@@ -112,6 +112,39 @@ named in `[input] system = file.pdb <indices>` is looked up relative to the
 working directory first and then next to the input file, like the `[qmmm]`
 auxiliary files, so every NAMD deck runs from any directory.
 
+### Solvent molecules in the QM region — `[flexible]`
+
+QM waters diffuse away from the solute and MM waters diffuse in. The FlexiBLE
+boundary potential of Shen and Glover (J. Chem. Phys. 155, 224112 (2021))
+holds the separation: each solvent molecule is placed by its anchor atom
+(`anchor=O`, or `com`) at its distance from a centre, and
+
+    V = -kT ln[ h(QM, MM) / sum over partitions h ],
+    h = exp(-sum_{i in QM, j in MM} g(r_i - r_j)),  g(R) = (aR)^3/(1 + aR) for R > 0
+
+so the actual partition costs nothing when every QM molecule is closer than
+every MM molecule. A whole residue named in `resnames` is a QM molecule when
+all its atoms are in `[qmmm] qm_atoms` and an MM molecule otherwise; a residue
+split between the regions is an error. For a solute in water:
+
+```text
+flexible(enabled=true, alpha=5.0, temperature=300, center=solute, atoms="0-11", anchor=O)
+```
+
+`alpha` is per angstrom (the plugin's tests use 5.0, i.e. 50 nm^-1); a small
+alpha lets very many partitions contribute and the run stops with an error
+rather than enumerating them. `temperature` is the kT of the potential and is
+set explicitly. `center=solute` uses the centre of mass of `atoms` (0-based;
+by default the QM atoms that are not solvent), `center=point` the fixed
+`point` in angstrom, and `center=molecules` the centre of mass of all
+solvent molecules (non-periodic only). Periodic runs (`cutoff=PME`) use the
+minimum-image distance and stop when a QM solvent molecule is not closer than
+half the box (MM molecules farther out contribute nothing). The partition sum follows the authors' OpenMM reference kernel
+(`threshold`, `scale`, `max_iterations`, `keep_below_threshold`), and
+`tests/test_flexible_boundary.py` checks energies and forces against values
+computed with that plugin (`tests/data/flexible_boundary_plugin_reference.json`;
+the generator is kept in openqp-devkit).
+
 NAMD writes a trajectory log (`<project>.log`), not a regression `.json`, so
 these serve as runnable demonstrations rather than numeric regression tests. See
 the [SOC-NAMD-QMMM workflow](https://open-quantum-platform.github.io/openqp-docs/workflows/soc-namd-qmmm/)

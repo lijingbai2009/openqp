@@ -6057,7 +6057,7 @@ def _check_runtype(config: dict[str, Any], report: CheckReport,
         )
         return
 
-    for section in ("droplet", "solute_com"):
+    for section in ("droplet", "solute_com", "flexible"):
         enabled = str(_get(config, section, "enabled", False)).strip().lower()
         if enabled in _TRUE_BOOL and runtype != "namd":
             report.add(
