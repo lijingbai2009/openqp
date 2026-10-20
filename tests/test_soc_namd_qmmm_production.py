@@ -8,6 +8,7 @@ SOC-QMMM production path.
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 import tempfile
@@ -838,13 +839,17 @@ class SOCNAMDQMMMProductionTests(unittest.TestCase):
                 driver._pending_nve_gate_error = None
                 driver._electronic_config_identity = (
                     namd._electronic_config_identity(mol.config))
+                driver._signature_config_sections = (
+                    namd._signature_config_sections(mol.config))
                 frozen_signature = driver._restart_signature()
                 mol.config["md"]["econs"] = True
                 self.assertNotEqual(
                     driver._restart_signature(), frozen_signature)
                 mol.config["md"]["econs"] = False
+                # SOC propagation switches the live response manifold on
+                # every step; the signature must keep the run's model.
                 mol.config["tdhf"]["multiplicity"] = 1
-                self.assertNotEqual(
+                self.assertEqual(
                     driver._restart_signature(), frozen_signature)
                 mol.config["tdhf"]["multiplicity"] = 3
                 self.assertEqual(
@@ -875,6 +880,156 @@ class SOCNAMDQMMMProductionTests(unittest.TestCase):
                 self.assertEqual(int(records["tracking_valid"][0]), 0)
         finally:
             cleanup()
+
+    def test_trajectory_appends_after_a_singlet_to_triplet_hop(self):
+        """A triplet active-state gradient must not invalidate the trajectory.
+
+        Formaldehyde SOC-MCH-NAMD hopped S1 -> T0(ms=-1) at step 58 and the
+        next append raised "schema/model mismatch" because the signature
+        read the live [tdhf] multiplicity that the triplet gradient set.
+        """
+        namd, _logs, cleanup = load_namd_with_stubs()
+
+        class _Excitation:
+            def __init__(self, mol):
+                self.mol = mol
+
+            def excitation(self, ref):
+                return [ref[0], ref[0] + 0.15]
+
+        class _TripletGradient:
+            def __init__(self, mol):
+                self.mol = mol
+
+            def gradient(self):
+                for state in self.mol.config["properties"]["grad"]:
+                    self.mol.grads[state] = np.full(6, 0.01)
+
+        namd.SinglePoint = _Excitation
+        namd.Gradient = _TripletGradient
+        try:
+            for cls, representation in (
+                    (namd.NAMD_SOC_MCH, "soc_mch"),
+                    (namd.NAMD_SOC, "soc_adiabatic")):
+                with self.subTest(representation=representation), \
+                        tempfile.TemporaryDirectory() as tmpdir:
+                    driver, mol, selected = self._soc_driver_after_s1_gradient(
+                        namd, cls, representation, tmpdir)
+                    driver._write_md_trajectory(
+                        0, np.zeros((2, 3)), -1.0, 0.1, False)
+
+                    # Hop to the first triplet Ms member (MCH basis 3 of 4).
+                    driver.active = 3
+                    driver.coef[:] = 0.0
+                    driver.coef[2] = 1.0
+                    if cls is namd.NAMD_SOC_MCH:
+                        driver._mch_exact_gradient(driver.active)
+                    else:
+                        namd._select_response_manifold(mol, 3)
+                    self.assertEqual(mol.config["tdhf"]["multiplicity"], 3)
+                    self.assertEqual(selected[-1], 3)
+                    driver._write_md_trajectory(
+                        1, np.zeros((2, 3)), -1.0, 0.1, True)
+                    # Back to the singlet manifold: still the same model.
+                    namd._select_response_manifold(mol, 1)
+                    driver._write_md_trajectory(
+                        2, np.zeros((2, 3)), -1.0, 0.1, False)
+
+                    header, records = namd.read_namd_trajectory(
+                        driver.trajectory_file)
+                    self.assertEqual(len(records), 3)
+                    self.assertEqual(
+                        json.loads(header["signature"])["tdhf_multiplicity"], 1)
+        finally:
+            cleanup()
+
+    @staticmethod
+    def _soc_driver_after_s1_gradient(namd, cls, representation, tmpdir):
+        """SOC driver with ns = nt = 1 whose live manifold is the singlet."""
+        selected = []
+
+        class _Data(dict):
+            def set_tdhf_multiplicity(self, mult):
+                selected.append(int(mult))
+
+        mol = types.SimpleNamespace(
+            config={
+                "input": {
+                    "method": "tdhf", "functional": "bhhlyp",
+                    "basis": "sto-3g", "charge": 0,
+                },
+                "scf": {"type": "rohf", "multiplicity": 3},
+                "tdhf": {
+                    "type": "mrsf", "multiplicity": 1,
+                    "nstate": 1, "tlf": 2,
+                },
+                "md": {
+                    "soc": True, "soc_basis": representation[4:],
+                    "econs": False,
+                },
+                "properties": {},
+            },
+            data=_Data({"OQP::td_energies": np.array([-1.0])}),
+            get_state_tracking=lambda: {
+                "order": [0], "phase_step": [1.0],
+                "matched_overlap": [1.0], "margin": [1.0],
+            },
+        )
+        mol.grads = {1: np.zeros(6)}
+        driver = cls.__new__(cls)
+        driver.mol = mol
+        driver._electronic_config_identity = (
+            namd._electronic_config_identity(mol.config))
+        driver._signature_config_sections = (
+            namd._signature_config_sections(mol.config))
+        driver.natom = 2
+        driver.ns = driver.nt = 1
+        driver.nstate = driver.nstate_soc = 4
+        driver.sing_energies = np.array([-1.1, -1.0])
+        driver.trip_energies = np.array([-1.1, -0.95])
+        driver.e_ref = -1.1
+        driver.coef = np.array([1.0, 0.0, 0.0, 0.0], dtype=complex)
+        driver._trajectory_state_energies = np.array([-1.0, -0.9, -0.9, -0.9])
+        driver._trajectory_representation = representation
+        driver.econs = False
+        driver._restart_system_identity = {"kind": "test", "sha256": "soc"}
+        driver._restart_molecular_identity = {"kind": "test", "sha256": "mol"}
+        driver.trajectory_file = str(Path(tmpdir) / "soc.namd.trj")
+        driver.trajectory_interval = 1
+        driver.dt_fs = 0.5
+        driver.dt_adaptive = False
+        driver._t_fs = 0.0
+        driver.seed = 1
+        driver.rng_stream = 0
+        driver.init_temp = 300.0
+        driver.active = 1
+        driver.vel = np.zeros((2, 3))
+        driver.odp = None
+        driver._last_hop_random = np.nan
+        driver._unbiased_potential_energy = -1.0
+        driver._last_state_overlap = None
+        driver._last_overlap_tdc = None
+        driver._nacme_reference_tdc = None
+        driver._nacme_reference_mask = None
+        driver._nacme_reference_source = 0
+        driver._nacme_gate_last = None
+        driver._nve_gate_last = None
+        driver._pending_nve_gate_error = None
+        return driver, mol, selected
+
+    def test_namd_init_freezes_signature_sections_before_propagation(self):
+        src = NAMD.read_text()
+        init = re.search(
+            r"class NAMD:.*?    def __init__\(self, mol\):(.*?)\n    def ",
+            src, re.S)
+        self.assertIsNotNone(init)
+        self.assertIn(
+            "self._signature_config_sections = _signature_config_sections(cfg)",
+            init.group(1))
+        signature = re.search(
+            r"    def _restart_signature\(self\):\n(.*?)\n    def ", src, re.S)
+        self.assertIn("cfg = self._signature_config()", signature.group(1))
+        self.assertNotIn("self.mol.config", signature.group(1))
 
     def test_all_soc_run_paths_prepare_and_write_dense_trajectories(self):
         src = NAMD.read_text()

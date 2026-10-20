@@ -138,6 +138,17 @@ def _electronic_config_identity(config):
     return _normalize_identity_value(identity)
 
 
+_SIGNATURE_CONFIG_SECTIONS = ('tdhf', 'dftb', 'xtb')
+
+
+def _signature_config_sections(config):
+    """Copy the config sections that per-step manifold switches mutate."""
+    return {
+        section: copy.deepcopy(config[section])
+        for section in _SIGNATURE_CONFIG_SECTIONS if section in config
+    }
+
+
 def _validate_gate_tolerances(label, *values):
     """Reject NaN/Inf as well as negative validation tolerances."""
     if len(values) == 1 and not np.isscalar(values[0]):
@@ -680,6 +691,13 @@ class NAMD:
         # Freeze the user-resolved electronic configuration before SOC/TB
         # helpers temporarily switch response manifolds during propagation.
         self._electronic_config_identity = _electronic_config_identity(cfg)
+        # _select_response_manifold rewrites [tdhf] multiplicity and the TB
+        # target multiplicity whenever a gradient, overlap, or excitation of
+        # the other spin manifold is evaluated (e.g. the gradient of a triplet
+        # active state after an S->T hop).  Restart and trajectory signatures
+        # read these frozen sections, so they describe the run's model rather
+        # than the manifold of the most recent electronic evaluation.
+        self._signature_config_sections = _signature_config_sections(cfg)
 
         self.nstep = int(md['nstep'])
         self.dt_fs = float(md['dt'])
@@ -3324,10 +3342,10 @@ class NAMD:
 
     def _effective_tight_binding_settings(self):
         """Return TB settings after non-mutating default-model resolution."""
-        method = str(self.mol.config['input'].get('method', '')).lower()
+        config = self._signature_config()
+        method = str(config['input'].get('method', '')).lower()
         if method not in ('dftb', 'xtb'):
             return method, {}
-        config = self.mol.config
         if method == 'dftb':
             config = copy.deepcopy(config)
             from oqp.utils.input_checker import apply_dftb_model_default
@@ -3481,8 +3499,23 @@ class NAMD:
         self._restart_molecular_identity = identity
         return identity
 
-    def _restart_signature(self):
+    def _signature_config(self):
+        """Return the configuration as it was when this run started.
+
+        Only the sections listed in ``_SIGNATURE_CONFIG_SECTIONS`` are
+        replaced; they are the ones that ``_select_response_manifold`` mutates
+        while the run evaluates the singlet and triplet manifolds.
+        """
         cfg = self.mol.config
+        frozen = getattr(self, '_signature_config_sections', None)
+        if frozen is None:
+            return cfg
+        view = dict(cfg)
+        view.update(frozen)
+        return view
+
+    def _restart_signature(self):
+        cfg = self._signature_config()
         md = cfg.get('md', {})
         electronic_config = getattr(
             self, '_electronic_config_identity', None)
