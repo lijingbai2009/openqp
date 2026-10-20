@@ -209,6 +209,7 @@ contains
     !==============================================================================
     logical :: do_pfon        ! Flag to use pFON method
     logical :: do_pfon_final  ! Flag to trigger extra iteration at 1K
+    logical :: pfon_density_cold  ! Current Fock was built from a 1 K pFON density
     type(pfon_t), pointer :: pfon => null()  ! pFON handler object
     real(kind=dp), allocatable, target :: occ_a(:), occ_b(:) ! Orbital occupations for alpha/beta
 
@@ -396,6 +397,7 @@ contains
     !==============================================================================
     do_pfon = .false.
     do_pfon = infos%control%pfon
+    pfon_density_cold = .false.
 
     if (do_pfon) then
       ! Flag to trigger extra iteration at 1K
@@ -1200,11 +1202,14 @@ contains
           .and. (.not. ps_force_iter) .and. (.not. xc_reuse_now) &
           .and. (.not. cold_first_iter) .and. (.not. aufbau_lost) &
           .and. .not. (shift_applied .and. iter > 1 .and. .not. (use_soscf .or. use_trah))) then
-        ! Fully converged - exit loop (pFON: only once annealed to ~1 K).
+        ! Fully converged - exit loop only after the current Fock and energy
+        ! have been built from a density formed at the final pFON temperature.
+        ! adjust_temperature can lower T to 1 K at the start of this iteration,
+        ! while the density used here still came from the previous, hotter one.
         ! The pFON exit goes through the same orbital-energy steps below as
         ! every other DIIS exit: it used to leave directly and published the
         ! shifted virtual energies of a vshift run (RHF/ROHF +vshift).
-        if (pfon_hot) then
+        if (pfon_hot .or. (do_pfon .and. .not. pfon_density_cold)) then
           do_pfon_final = .true.
         else
           if (vshift_last_iter) vshift = 0.0_dp
@@ -1451,6 +1456,7 @@ contains
           else
             call pfon%build_density(pdmat(:,1), mo_a, work1, work2, do_pfon)
           end if
+          pfon_density_cold = pfon%temp <= 1.0_dp + 1.0e-6_dp
         else
           call build_scf_density(pdmat, mo_a, mo_b, infos, basis)
         end if
