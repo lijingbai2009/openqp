@@ -62,7 +62,8 @@ class _FailingAlloc:
         return getattr(self._real, name)
 
 
-@pytest.mark.parametrize("status, exc", [(-2, MemoryError), (-1, RuntimeError)])
+@pytest.mark.parametrize("status, exc", [
+    (-2, MemoryError), (-1, RuntimeError), (-3, ValueError)])
 def test_failed_native_alloc_propagates(data, monkeypatch, status, exc):
     import oqp.molecule.oqpdata as oqpdata_mod
 
@@ -114,3 +115,55 @@ def test_refused_native_create_raises_before_copy(data):
         data[key] = np.array([1.0, 2.0, 3.0])
     assert "refused" in str(err.value)
     assert _tag_status(data, key) < 0
+
+
+# tagarray v1.0.0 status values (defines.csv of the pinned release).  The
+# harness takes the statuses from the tagarray_defines module itself; these
+# values only make a renumbering in a tagarray upgrade visible here.
+_TA_STATUS_CODES = [
+    ("TA_OK", 0, 0),
+    ("TA_MEMORY_ALLOCATION_ERROR", -1, -2),
+    ("TA_DATA_INCORRECT_DIMENSIONS", -10, -3),
+    ("TA_INCORRECT_TAG", -14, -3),
+    ("TA_CONTAINER_RECORD_EXISTS", -4, -3),
+    ("TA_DATA_TOO_MANY_DIMENSIONS", -8, -3),
+    ("TA_UNKNOWN_ERROR", -1000, -3),
+    ("TA_NOT_IMPLEMENTED", 1000, -3),
+]
+
+
+def test_native_create_status_maps_to_alloc_code():
+    # oqp_alloc must report a tagarray allocation failure as -2 (MemoryError
+    # in OQPData) and keep -3 (ValueError) for an invalid tag, invalid
+    # dimensions or a record conflict.  A real allocation failure cannot be
+    # induced portably (GCC 15 libstdc++ on macOS traps in a failing nothrow
+    # aligned new[]), so the Fortran harness drives the mapping that
+    # oqp_alloc uses with the named tagarray status constants.
+    from oqp import ffi, lib
+
+    nmax = 16
+    statuses = ffi.new(f"int32_t[{nmax}]")
+    codes = ffi.new(f"int64_t[{nmax}]")
+    n = ffi.new("int64_t *")
+    lib.oqp_alloc_status_selftest(nmax, statuses, codes, n)
+    assert n[0] == len(_TA_STATUS_CODES)
+    got = [(statuses[i], codes[i]) for i in range(n[0])]
+    want = [(status, code) for _, status, code in _TA_STATUS_CODES]
+    assert got == want, list(zip((name for name, _, _ in _TA_STATUS_CODES), got))
+
+    # Too small an output buffer is refused, not overrun.
+    lib.oqp_alloc_status_selftest(2, statuses, codes, n)
+    assert n[0] == -1
+
+
+@pytest.mark.parametrize("_name, status, code", _TA_STATUS_CODES[1:])
+def test_alloc_code_reaches_python_as_documented_exception(
+        data, monkeypatch, _name, status, code):
+    # Second half of the route: the code oqp_alloc returns for each failing
+    # tagarray status raises the matching OQPData exception.
+    import oqp.molecule.oqpdata as oqpdata_mod
+
+    exc = MemoryError if code == -2 else ValueError
+    monkeypatch.setattr(oqpdata_mod, "lib", _FailingAlloc(oqpdata_mod.lib, code))
+    with pytest.raises(exc):
+        data["OQP::PROBE_STATUS_ROUTE"] = np.array([1.0, 2.0])

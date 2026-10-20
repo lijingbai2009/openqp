@@ -1284,7 +1284,8 @@ class OQPData:
         if data_size == -3:
             raise ValueError(
                 f"Cannot store OQP data tag `{key}`: tagarray refused to create "
-                "the record (invalid tag or record conflict)")
+                "the record (invalid tag, invalid dimensions or record "
+                "conflict)")
         if data_size < 0:
             raise MemoryError(
                 f"Cannot allocate OQP data tag `{key}` with shape {shape} "
