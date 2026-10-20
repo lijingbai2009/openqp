@@ -5931,6 +5931,22 @@ def _check_per_manifold_gradients(config: dict[str, Any], report: CheckReport,
     # solves one ladder keeps [tdhf] nstate.
     two = _two_ladders(config)
     requests = _spin_states.grad_requests(config)
+    # A two-ladder run solves both ladders from one reference SCF
+    # (reference() + excitation() per ladder); the in-place ixcore shift that
+    # energy() applies is not part of that path.  A spin-orbit run reports
+    # this through _check_soc.
+    if two and not _spin_states.soc_requested(config) \
+            and str(_get(config, "tdhf", "ixcore", "-1")).strip() not in ("", "-1"):
+        report.add(
+            "ERROR",
+            "tdhf.ixcore",
+            "grad_s / grad_t ask for a second spin ladder, which is solved from "
+            "the same reference without the in-place [tdhf] ixcore core shift.",
+            value=_get(config, "tdhf", "ixcore", "-1"),
+            expected="-1 (unset)",
+            action="Leave [tdhf] ixcore at its default, or request gradients on "
+                   "one ladder only.",
+        )
     for label, name in (("s", "singlet"), ("t", "triplet")):
         states = requests[label]
         if not states:

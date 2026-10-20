@@ -307,6 +307,35 @@ class SOCManifoldCouplingTests(unittest.TestCase):
                         'nacme_t differs from the manifold-only triplet run by '
                         f'{difference:.3e}')
 
+    def test_unlabelled_records_belong_to_the_configured_ladder(self):
+        """The deck is configured for singlets, so every unlabelled record --
+        energies, amplitudes, state tracking and the checkpoint -- is the
+        singlet ladder's, not the one a two-ladder run happened to solve last."""
+        import json
+
+        data = self.soc[1]
+        np.testing.assert_array_equal(np.asarray(data['OQP::td_energies']),
+                                      np.asarray(data['OQP::td_singlet_energies']))
+        np.testing.assert_array_equal(np.asarray(data['OQP::td_bvec_mo']),
+                                      np.asarray(data['OQP::td_bvec_mo_s']))
+        np.testing.assert_array_equal(np.asarray(data['OQP::state_tracking_lineage']),
+                                      np.asarray(data['OQP::state_tracking_lineage_s']))
+        checkpoint = json.loads((self.workdir / 'step2.json').read_text(encoding='utf-8'))
+        self.assertEqual(np.asarray(checkpoint['OQP::td_energies']).size, 2)
+        np.testing.assert_allclose(np.asarray(checkpoint['OQP::td_energies']),
+                                   np.asarray(data['OQP::td_singlet_energies']),
+                                   rtol=0, atol=1e-14)
+
+    def test_each_ladder_keeps_its_own_state_tracking_record(self):
+        """The ladders have 2 and 3 roots here; each tracking record has its
+        own ladder's length and is a permutation of it."""
+        data = self.soc[1]
+        for label, nroot in (('s', 2), ('t', 3)):
+            lineage = np.asarray(data[f'OQP::state_tracking_lineage_{label}'])
+            phase = np.asarray(data[f'OQP::state_tracking_phase_initial_{label}'])
+            self.assertEqual(sorted(lineage.tolist()), list(range(nroot)), label)
+            np.testing.assert_allclose(np.abs(phase), np.ones(nroot), atol=1e-12)
+
     def test_the_history_really_is_a_different_step(self):
         """Guards against the agreement coming from pairing a step with itself."""
         current = np.asarray(self.soc[1]['OQP::td_bvec_mo_t'])
@@ -319,12 +348,12 @@ class SOCManifoldCouplingTests(unittest.TestCase):
 class TwoLadderHistoryWithoutSOCTests(unittest.TestCase):
     """A two-ladder step without spin-orbit coupling still records its history.
 
-    The unlabelled amplitude tags end up holding the ladder solved last (the
-    triplet), so the next step's singlet NACME must read the labelled singlet
-    record.  Without one, it overlapped singlet amplitudes with the previous
-    step's triplets, measured 1.3e-1 off the singlet-only oracle here with
-    nothing reported.  Agreeing with that oracle to 1e-6 therefore only holds
-    if the singlets were paired with their own history.
+    The next step's singlet NACME must read the labelled singlet record.
+    When the unlabelled tags held the ladder solved last (the triplet), it
+    overlapped singlet amplitudes with the previous step's triplets, measured
+    1.3e-1 off the singlet-only oracle here with nothing reported.  Agreeing
+    with that oracle to 1e-6 therefore only holds if the singlets were paired
+    with their own history.
     """
 
     @classmethod
@@ -986,10 +1015,264 @@ class SOCExampleReferenceTests(unittest.TestCase):
             self.assertIn('td_singlet_energies', reference, name)
             self.assertIn('td_triplet_energies', reference, name)
 
+    def test_the_example_publishes_its_configured_ladder_unlabelled(self):
+        """prop(S1) is a singlet deck: its unlabelled td_energies are singlets."""
+        import json
+
+        reference = json.loads(
+            (EXAMPLES / 'SOC' / 'H2O_BHHLYP_MRSF_PROP_SOC.json').read_text(encoding='utf-8'))
+        np.testing.assert_allclose(reference['td_energies'],
+                                   reference['td_singlet_energies'], rtol=0, atol=1e-12)
+
     def test_the_example_turns_the_flag_on(self):
         # openqp --check_feature_coverage only reads .inp files.
         text = SOC_DECK.read_text(encoding='utf-8')
         self.assertRegex(text, r'(?m)^\s*soc\s*=\s*true\s*$')
+
+
+class _HistoryData(dict):
+    """OQPData stand-in: a missing tag raises AttributeError like the real one."""
+
+    def __getitem__(self, key):
+        try:
+            return dict.__getitem__(self, key)
+        except KeyError:
+            raise AttributeError(key) from None
+
+
+class _HistoryMol:
+    def __init__(self, data):
+        self.data = data
+
+
+@unittest.skipUnless(_oqp_available(), "OpenQP shared library is not built")
+class StateHistoryPerLadderTests(unittest.TestCase):
+    """NACME.load_state_history installs one ladder's complete history."""
+
+    def _nacme(self, data):
+        from oqp.library.single_point import NACME
+        nacme = NACME.__new__(NACME)
+        nacme.mol = _HistoryMol(data)
+        return nacme
+
+    def test_the_lineage_comes_from_the_ladders_own_record(self):
+        data = _HistoryData({
+            # unlabelled previous step: the other ladder, roots swapped
+            'OQP::td_bvec_mo_old': np.zeros((4, 2)),
+            'OQP::td_energies_old': np.array([0.1, 0.2]),
+            'OQP::state_tracking_lineage_old': np.array([1, 0], dtype=np.int32),
+            'OQP::state_tracking_phase_initial_old': np.array([-1.0, 1.0]),
+            # this ladder's own record
+            'OQP::td_bvec_mo_s_old': np.ones((4, 2)),
+            'OQP::td_singlet_energies_old': np.array([0.3, 0.4]),
+            'OQP::state_tracking_lineage_s_old': np.array([0, 1], dtype=np.int32),
+            'OQP::state_tracking_phase_initial_s_old': np.array([1.0, -1.0]),
+        })
+        self.assertTrue(self._nacme(data).load_state_history('s'))
+        np.testing.assert_array_equal(data['OQP::td_bvec_mo_old'], np.ones((4, 2)))
+        np.testing.assert_array_equal(data['OQP::state_tracking_lineage_old'], [0, 1])
+        np.testing.assert_array_equal(data['OQP::state_tracking_phase_initial_old'],
+                                      [1.0, -1.0])
+
+    def test_a_record_without_tracking_starts_its_lineage(self):
+        data = _HistoryData({
+            'OQP::state_tracking_lineage_old': np.array([1, 0], dtype=np.int32),
+            'OQP::state_tracking_phase_initial_old': np.array([-1.0, 1.0]),
+            'OQP::td_bvec_mo_t_old': np.ones((4, 2)),
+            'OQP::td_triplet_energies_old': np.array([0.3, 0.4]),
+        })
+        self.assertTrue(self._nacme(data).load_state_history('t'))
+        np.testing.assert_array_equal(data['OQP::state_tracking_lineage_old'], [0, 1])
+        np.testing.assert_array_equal(data['OQP::state_tracking_phase_initial_old'],
+                                      [1.0, 1.0])
+
+    def test_a_single_ladder_run_reads_its_own_labelled_record(self):
+        """A single-ladder triplet step seeded from a two-ladder checkpoint
+        (unlabelled = the singlet ladder) pairs with the triplet record, and
+        does not add labelled tracking records of its own."""
+        nacme = self._nacme(_HistoryData({
+            'OQP::td_bvec_mo_old': np.zeros((4, 2)),
+            'OQP::td_energies_old': np.array([0.1, 0.2]),
+            'OQP::td_bvec_mo_t_old': np.ones((6, 3)),
+            'OQP::td_triplet_energies_old': np.array([0.3, 0.4, 0.5]),
+        }))
+        self.assertTrue(nacme.load_state_history('t', record_tracking=False))
+        self.assertEqual(np.asarray(nacme.mol.data['OQP::td_bvec_mo_old']).shape, (6, 3))
+        self.assertIsNone(nacme._history_label)
+
+    def test_a_ladder_without_history_is_not_aligned_to_the_other_one(self):
+        """The other ladder installed its history first (the drivers solve it
+        first); this ladder has no labelled record, so it falls back to the
+        unlabelled previous step as BasisOverlap left it."""
+        previous = np.full((4, 2), 2.0)
+        mol = _HistoryMol(_HistoryData({
+            'OQP::td_energies': np.array([0.5, 0.6]),
+            'OQP::td_bvec_mo': np.zeros((4, 2)),
+            'OQP::td_bvec_mo_old': previous.copy(),
+            'OQP::td_energies_old': np.array([0.1, 0.2]),
+            'OQP::td_bvec_mo_t_old': np.ones((4, 2)),
+            'OQP::td_triplet_energies_old': np.array([0.3, 0.4]),
+        }))
+        from oqp.library.single_point import NACME
+        first, second = NACME.__new__(NACME), NACME.__new__(NACME)
+        first.mol = second.mol = mol
+        self.assertTrue(first.load_state_history('t'))
+        self.assertFalse(second.load_state_history('s'))
+        np.testing.assert_array_equal(mol.data['OQP::td_bvec_mo_old'], previous)
+        np.testing.assert_array_equal(mol.data['OQP::state_tracking_lineage_old'], [0, 1])
+
+
+@unittest.skipUnless(_oqp_available(), "OpenQP shared library is not built")
+class NumericalNACChildConfigTests(unittest.TestCase):
+    """A numerical-NAC displacement child is a single-ladder nacme job."""
+
+    def test_a_two_ladder_parent_writes_children_the_checker_accepts(self):
+        import copy
+        import os
+        from unittest import mock
+
+        from oqp.molecule.oqpdata import OQP_CONFIG_SCHEMA
+        from oqp.utils.input_checker import check_input_values
+        from oqp.utils.input_parser import OQPConfigParser
+        import oqp.library.single_point as single_point
+
+        # prop with nac=nac and a triplet gradient next to the singlet one: a
+        # two-ladder run without spin-orbit coupling, which the checker accepts.
+        text = (SOC_DECK.read_text(encoding='utf-8')
+                .replace('soc=true\n', '').replace('nac=nacme', 'nac=nac'))
+        parser = OQPConfigParser(schema=OQP_CONFIG_SCHEMA, allow_no_value=True)
+        parser.read_string(text)
+        config = parser.validate()
+        parent = check_input_values(copy.deepcopy(config), raise_error=False, emit=False)
+        self.assertEqual([item.path for item in parent.errors], [], parent.to_text())
+
+        with tempfile.TemporaryDirectory(prefix='numnac_child_') as tmp:
+            key_dict = {
+                'idx': 0, 'dx': 1.0e-3,
+                'atoms': np.array([8.0, 1.0, 1.0]),
+                'coord': np.zeros(9),
+                'nstate': 2, 'dir_nacv': tmp, 'project_name': 'parent',
+                'config': copy.deepcopy(config),
+                'guess_file': os.path.join(tmp, 'parent.json'),
+                'restart': False,
+            }
+            self.assertFalse(single_point.MPIManager().use_mpi)
+            with mock.patch.object(single_point, '_run_oqp_external') as run, \
+                    mock.patch.dict(os.environ, {'OMP_NUM_THREADS': '1'}):
+                single_point.nacme_wrapper(key_dict)
+            run.assert_called_once()
+            child = Path(run.call_args[0][0])
+            # The child reads the parent's checkpoint as its guess; a real run
+            # has written it before the workers start.
+            Path(key_dict['guess_file']).write_text('{}', encoding='utf-8')
+            parser = OQPConfigParser(schema=OQP_CONFIG_SCHEMA, allow_no_value=True)
+            parser.read(str(child))
+            child_config = parser.validate()
+            self.assertEqual(child_config['input']['runtype'], 'nacme')
+            report = check_input_values(child_config, raise_error=False, emit=False,
+                                        input_dir=tmp)
+        self.assertEqual([item.path for item in report.errors], [], report.to_text())
+
+
+class SOCConciseLoweringTests(unittest.TestCase):
+    """properties(grad_s / grad_t) and the driver state combine without loss."""
+
+    @staticmethod
+    def _lower(line):
+        from oqp.utils import oqp_input
+
+        with tempfile.TemporaryDirectory(prefix='soc_lower_') as tmp:
+            Path(tmp, 'h2o.xyz').write_text(
+                '3\nH2O\nO 0 0 0\nH 0 0.7 0.5\nH 0 -0.7 0.5\n', encoding='utf-8')
+            spec = oqp_input.parse_canonical_oqp(line + '\ngeom="h2o.xyz"\n')
+            config = oqp_input.lower_to_legacy(spec, source_dir=Path(tmp))
+        properties = config['properties']
+        return {key: properties[key] for key in ('grad', 'grad_s', 'grad_t')
+                if key in properties}
+
+    def test_an_explicit_selector_is_kept(self):
+        self.assertEqual(
+            self._lower('mrsf/bhhlyp/6-31g* data(soc=true) properties(grad_s=3)'),
+            {'grad_s': '3'})
+
+    def test_the_route_default_state_is_not_a_request(self):
+        self.assertEqual(
+            self._lower('mrsf/bhhlyp/6-31g* prop(soc=true) properties(grad_t=2)'),
+            {'grad_t': '2'})
+
+    def test_the_named_state_and_the_other_ladder_combine(self):
+        self.assertEqual(
+            self._lower('mrsf/bhhlyp/6-31g* prop(S1) properties(soc=true, grad_t=2)'),
+            {'grad_s': '2', 'grad_t': '2'})
+        self.assertEqual(
+            self._lower('mrsf/bhhlyp/6-31g* prop(S1,soc=true) properties(grad_s=2)'),
+            {'grad_s': '2'})
+
+    def test_a_contradicting_selector_is_refused(self):
+        from oqp.utils.oqp_input import OQPInputError
+
+        with self.assertRaises(OQPInputError):
+            self._lower('mrsf/bhhlyp/6-31g* prop(S1,soc=true) properties(grad_s=3)')
+
+
+class SOCLegacyConversionTests(unittest.TestCase):
+    """tools/convert_legacy_examples.py keeps what a ladder deck asks for."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        import sys
+
+        name = '_soc_test_convert_legacy_examples'
+        spec = importlib.util.spec_from_file_location(
+            name, ROOT / 'tools' / 'convert_legacy_examples.py')
+        cls.converter = importlib.util.module_from_spec(spec)
+        cls._saved = sys.modules.get(name)
+        sys.modules[name] = cls.converter
+        try:
+            spec.loader.exec_module(cls.converter)
+        finally:
+            if cls._saved is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = cls._saved
+        head = SOC_DECK.read_text(encoding='utf-8').split('[properties]')[0]
+        cls.head = head
+
+    def _convert(self, properties, runtype='prop'):
+        with tempfile.TemporaryDirectory(prefix='soc_convert_') as tmp:
+            root = Path(tmp) / 'examples'
+            (root / 'SOC').mkdir(parents=True)
+            deck = root / 'SOC' / 'deck.inp'
+            deck.write_text(self.head.replace('runtype=prop', f'runtype={runtype}')
+                            + '[properties]\n' + properties, encoding='utf-8')
+            result = self.converter.convert_file(
+                deck, root, self.converter.GeometryCatalog())
+            spec = self.converter.oqp_input.parse_canonical_oqp(result.text)
+            lowered = self.converter.oqp_input.lower_to_legacy(spec, source_dir=deck.parent)
+        return result, lowered['properties']
+
+    def test_a_triplet_only_soc_deck_keeps_its_meaning(self):
+        _, properties = self._convert('soc=true\ngrad_t=2\n')
+        self.assertEqual(properties.get('grad_t'), '2')
+        self.assertNotIn('grad_s', properties)
+
+    def test_the_default_shared_selector_is_legal(self):
+        result, properties = self._convert('soc=true\ngrad=0\ngrad_t=2\n')
+        self.assertEqual(properties.get('grad_t'), '2')
+        self.assertNotIn('grad_s', properties)
+        self.assertTrue(any('grad=0' in item for item in result.warnings))
+
+    def test_a_deck_whose_meaning_would_change_stays_legacy_only(self):
+        # Without SOC, prop() would lower to grad=1 for the singlet ladder,
+        # adding a gradient the legacy deck never asked for.
+        with self.assertRaises(self.converter.ConversionError):
+            self._convert('grad_t=2\n')
+
+    def test_a_data_soc_deck_keeps_its_meaning(self):
+        _, properties = self._convert('soc=true\ngrad_s=2\n', runtype='data')
+        self.assertEqual(properties.get('grad_s'), '2')
+        self.assertNotIn('grad_t', properties)
 
 
 class SOCPythonAPITests(unittest.TestCase):

@@ -195,6 +195,26 @@ def _raise_unavailable_wavefunction_method(method):
     raise ValueError(f'Unknown method type {method}')
 
 
+def _single_ladder_child(config):
+    """Drop the two-ladder selectors from a finite-difference child job config.
+
+    A displaced child (numerical NAC, numerical Hessian, IR/Raman intensities)
+    is one single-ladder calculation: the parent has already switched [tdhf]
+    to the ladder it differentiates (response_manifold), and the child's own
+    runtype (nacme/grad/energy) has no second ladder.  [properties] grad_s,
+    grad_t and soc are requests of the PARENT run.  Left in the copied config
+    they are read again by the child's input checker, which refuses them
+    outside runtype=grad/prop/data, so every worker of a numerical-NAC
+    two-ladder run stopped before computing anything.  The values are the
+    schema defaults in string form, valid both for write_config (which omits
+    the empty ones) and for an all-string input_dict.
+    """
+    properties = config.setdefault('properties', {})
+    properties['grad_s'] = ''
+    properties['grad_t'] = ''
+    properties['soc'] = 'false'
+
+
 def _no_integral_symmetry_in_child(config):
     """Force ``[symmetry] use_integral_symmetry`` off in a child job config.
 
@@ -2211,6 +2231,7 @@ class Hessian(Calculator):
         }
         config['input']['runtype'] = 'energy'
         _no_integral_symmetry_in_child(config)
+        _single_ladder_child(config)
         if config.get('guess', {}).get('type') == 'json':
             config['guess']['type'] = 'huckel'
         config['guess']['save_mol'] = 'false'
@@ -2953,6 +2974,7 @@ def grad_wrapper(key_dict):
         # modify config
         config['input']['runtype'] = 'grad'
         _no_integral_symmetry_in_child(config)
+        _single_ladder_child(config)
         _finite_difference_response_tolerances(config)
         config['input']['system'] = xyz
         config['guess']['type'] = 'json'
@@ -3171,9 +3193,10 @@ class BasisOverlap(Calculator):
             pass
 
         # A spin-orbit run publishes the amplitudes of both ladders, so keep the
-        # per-manifold history: the generic tag holds whichever manifold that
-        # step solved last, and coupling a manifold against the other one's
-        # amplitudes is not a derivative coupling.
+        # per-manifold history: the generic tag holds one manifold only (the
+        # configured one, which the drivers solve last), and coupling a
+        # manifold against the other one's amplitudes is not a derivative
+        # coupling.
         for amplitude, ladder in (('OQP::td_bvec_mo_s', 'OQP::td_singlet_energies'),
                                   ('OQP::td_bvec_mo_t', 'OQP::td_triplet_energies')):
             try:
@@ -3181,6 +3204,18 @@ class BasisOverlap(Calculator):
                 self.mol.data[f'{ladder}_old'] = previous_data[ladder]
             except (AttributeError, KeyError):
                 pass
+        # A new previous-step record: NACME.load_state_history keeps its own
+        # pristine copy of it once per step.
+        self.mol._unlabelled_state_history = None
+        # ... and the per-manifold state-tracking record (lineage and phase),
+        # for the same reason: the unlabelled one belongs to one ladder only.
+        for spin in ('s', 't'):
+            for record in ('OQP::state_tracking_lineage',
+                           'OQP::state_tracking_phase_initial'):
+                try:
+                    self.mol.data[f'{record}_{spin}_old'] = previous_data[f'{record}_{spin}']
+                except (AttributeError, KeyError):
+                    pass
         try:
             self.mol.data["OQP::state_tracking_lineage_old"] = previous_data[
                 "OQP::state_tracking_lineage"
@@ -3382,6 +3417,14 @@ class NACME(BasisOverlap):
         self.mol.data['OQP::state_tracking_previous_phase_initial'] = previous_phase
         self.mol.data['OQP::state_tracking_overlap'] = matched
         self.mol.data['OQP::state_tracking_margin'] = margin
+        # A two-ladder run keeps this ladder's tracking under its own label as
+        # well (see load_state_history); the unlabelled record above is
+        # overwritten by the next ladder the run aligns.
+        history_label = getattr(self, '_history_label', None)
+        if history_label is not None:
+            self.mol.data[f'OQP::state_tracking_lineage_{history_label}'] = lineage.copy()
+            self.mol.data[f'OQP::state_tracking_phase_initial_{history_label}'] = \
+                phase_step.copy()
         # Only tracking performed in this calculation may be exposed through
         # Molecule.get_results()/Runner.results().  Guess JSON tags remain
         # available above as transport history, but are not current results.
@@ -3413,23 +3456,77 @@ class NACME(BasisOverlap):
             noca=noca, nocb=nocb, multiplicity=mult, tlf_order=tlf)
         data["OQP::td_states_overlap"] = s_st
 
-    def load_state_history(self, spin_label):
+    _HISTORY_TAGS = ('OQP::td_bvec_mo_old', 'OQP::td_energies_old',
+                     'OQP::state_tracking_lineage_old',
+                     'OQP::state_tracking_phase_initial_old')
+
+    def load_state_history(self, spin_label, record_tracking=True):
         """Pair the current amplitudes with the same manifold's previous step.
 
         ``OQP::td_bvec_mo_old`` without a label holds whichever ladder that step
-        solved last, so a run reporting both manifolds has to take this one's own
-        record before overlapping them.  Returns False when the previous step
-        published no such record, which means there is nothing to couple against.
+        published, so a run reporting both manifolds has to take this one's own
+        record before overlapping them -- amplitudes, energies, and the
+        state-tracking lineage and initial phase.  Returns False when the
+        previous step published no such record, which means there is nothing
+        to couple against.  The unlabelled previous-step record as
+        BasisOverlap left it is kept once per step, so a ladder without a
+        labelled record is never aligned against the other ladder's history
+        that an earlier call installed.
+
+        ``record_tracking`` makes align_x also keep this ladder's tracking
+        under its label, which a two-ladder run needs for its next step.
         """
         data = self.mol.data
+        # align_x records the state tracking of this ladder under its label.
+        self._history_label = spin_label if record_tracking else None
+        pristine = getattr(self.mol, '_unlabelled_state_history', None)
+        if pristine is None:
+            pristine = {}
+            for key in self._HISTORY_TAGS:
+                try:
+                    pristine[key] = np.array(data[key], copy=True)
+                except (AttributeError, KeyError):
+                    pass
+            self.mol._unlabelled_state_history = pristine
+
         ladder = 'singlet' if spin_label == 's' else 'triplet'
         try:
             amplitudes = np.array(data[f'OQP::td_bvec_mo_{spin_label}_old'], copy=True)
             energies = np.array(data[f'OQP::td_{ladder}_energies_old'], copy=True)
         except (AttributeError, KeyError):
+            # No labelled record: fall back to the unlabelled previous step,
+            # exactly as BasisOverlap left it.  Without one (first step) the
+            # ladder is its own reference and starts its lineage here; align_x
+            # would otherwise fall back to the current unlabelled tracking,
+            # which in a two-ladder run may belong to the other ladder.
+            for key, value in pristine.items():
+                data[key] = value
+            nroot = int(np.asarray(data['OQP::td_energies']).size)
+            if 'OQP::td_bvec_mo_old' not in pristine:
+                data['OQP::td_bvec_mo_old'] = np.array(data['OQP::td_bvec_mo'], copy=True)
+                data['OQP::td_energies_old'] = np.array(data['OQP::td_energies'], copy=True)
+            if 'OQP::state_tracking_lineage_old' not in pristine:
+                data['OQP::state_tracking_lineage_old'] = np.arange(nroot, dtype=np.int32)
+            if 'OQP::state_tracking_phase_initial_old' not in pristine:
+                data['OQP::state_tracking_phase_initial_old'] = np.ones(nroot, dtype=float)
             return False
         data['OQP::td_bvec_mo_old'] = amplitudes
         data['OQP::td_energies_old'] = energies
+        # The state-tracking lineage and initial phase are per ladder too: the
+        # unlabelled *_old record belongs to whichever ladder the previous
+        # checkpoint published, and align_x would otherwise carry that ladder's
+        # identities into this one.  A previous step that recorded amplitudes
+        # but no tracking for this ladder starts its lineage here.
+        nroot = int(energies.size)
+        for record, start in (('OQP::state_tracking_lineage',
+                               np.arange(nroot, dtype=np.int32)),
+                              ('OQP::state_tracking_phase_initial',
+                               np.ones(nroot, dtype=float))):
+            try:
+                value = np.array(data[f'{record}_{spin_label}_old'], copy=True)
+            except (AttributeError, KeyError):
+                value = start
+            data[f'{record}_old'] = value
         return True
 
     def nacme(self, align=True, reorder_x=False, normalize_retained=False, spin_label=None):
@@ -3966,6 +4063,7 @@ def nacme_wrapper(key_dict):
         # modify config
         config['input']['runtype'] = 'nacme'
         _no_integral_symmetry_in_child(config)
+        _single_ladder_child(config)
         config['input']['system'] = xyz
         config['guess']['type'] = 'json'
         config['guess']['file'] = guess_file

@@ -254,13 +254,35 @@ def compute_grad(mol):
     spin_label = label if per_manifold else None
 
     sp = SinglePoint(mol)
+    record = None
+    ref_energy = None
+    if per_manifold:
+        # The other ladder is solved FIRST, so that every unlabelled record the
+        # run leaves behind -- energies, amplitudes, gradients and the saved
+        # checkpoint -- belongs to the ladder this run is configured for.  Each
+        # ladder is also recorded under its own label, so a checkpoint of this
+        # run can seed a later step's history (NACME.load_state_history).
+        ref_energy = sp.reference()          # one SCF feeds both ladders
+        record = _soc_driver(mol, sp=sp)
+        with response_manifold(sp, other):
+            sp.excitation(ref_energy)
+            # before LastStep saves the molecule
+            record.snapshot(other)
+            with grad_request(mol, requests[other]):
+                Gradient(mol).gradient()
+            LastStep(mol).compute(mol, grad_list=requests[other], spin_label=other)
+
     with _configured_manifold(sp, label, per_manifold):
         # compute energy
         # Set the requested response state while converging the full reported
         # spectrum.  grad_request first: _single_gradient_target reads
         # [properties] grad.
         with grad_request(mol, requests[label]), _single_gradient_target(mol):
-            sp.energy()
+            if per_manifold:
+                sp.excitation(ref_energy)
+                record.snapshot(label)
+            else:
+                sp.energy()
 
             # compute gradient, unless only the other ladder asked for one
             if requests[label] or not per_manifold:
@@ -273,21 +295,6 @@ def compute_grad(mol):
 
         # compute dftd4
         LastStep(mol).compute(mol, grad_list=requests[label], spin_label=spin_label)
-
-    if per_manifold:
-        # Record each ladder under its own label, as the properties and data
-        # flows do, so a checkpoint of this run can seed a later step's history.
-        record = _soc_driver(mol, sp=sp)
-        record.snapshot(label)
-
-        # compute the gradient of the other spin manifold
-        with response_manifold(sp, other):
-            sp.excitation([mol.mol_energy.energy])
-            # before LastStep saves the molecule
-            record.snapshot(other)
-            with grad_request(mol, requests[other]):
-                Gradient(mol).gradient()
-            LastStep(mol).compute(mol, grad_list=requests[other], spin_label=other)
 
 def compute_md(mol):
     """Run gas-phase ground-state Born--Oppenheimer dynamics.
@@ -402,10 +409,44 @@ def compute_properties(mol):
     sp = SinglePoint(mol)
     ref_energy = sp.reference()
 
-    with _configured_manifold(sp, label, per_manifold):
-        # compute mo overlap and apply alignment
-        BasisOverlap(mol).overlap()
+    # compute mo overlap and apply alignment; it is common to both ladders
+    BasisOverlap(mol).overlap()
 
+    soc = _soc_driver(mol, sp=sp, ref_energy=ref_energy) if per_manifold else None
+    if per_manifold:
+        # The other spin manifold is solved FIRST, so that every unlabelled
+        # record -- energies, amplitudes, state tracking, couplings, gradients
+        # and the checkpoint the next MD step reads -- belongs to the ladder
+        # this run is configured for, which is solved last below.  Each ladder
+        # is also recorded under its own label (SOC.snapshot), including its
+        # state-tracking lineage, and the next step pairs each ladder with its
+        # own history through those records (NACME.load_state_history).
+        other_grad_list = requests[other]
+        with response_manifold(sp, other):
+            sp.excitation(ref_energy)
+
+            # transport this ladder's gauge against its own previous step
+            other_nacme = NACME(mol)
+            has_history = other_nacme.load_state_history(other, record_tracking=True)
+            if has_history:
+                other_nacme.align_x()
+            # record the phase-fixed amplitudes before LastStep saves the molecule
+            soc.snapshot(other)
+
+            # compute its gradient, if it requested one
+            if other_grad_list:
+                with grad_request(mol, other_grad_list):
+                    Gradient(mol).gradient()
+                    LastStep(mol).compute(mol, grad_list=other_grad_list,
+                                          spin_label=other)
+            else:
+                LastStep(mol).compute(mol, spin_label=other)
+
+            # compute its couplings, against its own previous step
+            if soc_on and nac_type == 'nacme' and has_history:
+                other_nacme.nacme(align=False, spin_label=other)
+
+    with _configured_manifold(sp, label, per_manifold):
         # compute excitation energy; _single_gradient_target reads this
         # ladder's request, so install it first
         with grad_request(mol, grad_list), _single_gradient_target(mol):
@@ -416,11 +457,16 @@ def compute_properties(mol):
         # feeds that JSON into the next MD step; aligning only inside displaced
         # workers leaves the time-series phase undefined.
         nacme = NACME(mol)
-        if per_manifold:
-            # The unlabelled history tag holds whichever ladder the previous step
-            # answered last, so align this ladder against its own record first.
-            nacme.load_state_history(label)
+        # Pair this ladder with its own previous step.  A previous two-ladder
+        # checkpoint holds each ladder under its label and only the configured
+        # one unlabelled, so a run whose ladder differs from that -- including a
+        # single-ladder run -- must read the labelled record; without one, the
+        # unlabelled previous step is used as before.
+        nacme.load_state_history(label, record_tracking=per_manifold)
         nacme.align_x()
+        if per_manifold:
+            # before LastStep saves the molecule
+            soc.snapshot(label)
 
         # compute gradient, unless only the other ladder asked for one
         if grad_list or not per_manifold:
@@ -436,16 +482,33 @@ def compute_properties(mol):
         elif nac_type == 'nacme':
             nacme.nacme(align=False, spin_label=spin_label)
 
-    if requests[other] or soc_on:
-        other_grad_list = requests[other]
-        soc = _soc_driver(mol, sp=sp, ref_energy=ref_energy)
-        # Record each ladder under its own label whenever two are solved, not
-        # only for the coupling: the unlabelled tags end up holding the ladder
-        # solved last, so the next step pairs each ladder with its own history
-        # through these records (NACME.load_state_history).
-        soc.snapshot(label)
+    if soc_on:
+        # compute the coupling between the two recorded, phase-fixed ladders
+        soc.coupling()
 
-        # compute the other spin manifold
+def compute_data(mol):
+    from oqp.library.single_point import grad_request, response_manifold
+
+    soc_on = _soc_requested(mol)
+    label, other, requests = _spin_setup(mol)
+    grad_list = requests[label]
+    # Two ladders are published side by side whenever a second one was asked
+    # for, by its own selector or by spin-orbit coupling; only then does a file
+    # name have to say which manifold it holds.
+    per_manifold = soc_on or bool(requests[other])
+    spin_label = label if per_manifold else None
+
+    sp = SinglePoint(mol)
+    soc = None
+    ref_energy = None
+    if per_manifold:
+        # The other spin manifold is solved FIRST, so that every unlabelled
+        # record and the saved checkpoint belong to the configured ladder,
+        # which is solved last below; each ladder is also recorded under its
+        # own label, as compute_properties does.
+        ref_energy = sp.reference()          # one SCF feeds both ladders
+        soc = _soc_driver(mol, sp=sp, ref_energy=ref_energy)
+        other_grad_list = requests[other]
         with response_manifold(sp, other):
             sp.excitation(ref_energy)
             # before LastStep saves the molecule
@@ -460,37 +523,15 @@ def compute_properties(mol):
             else:
                 LastStep(mol).compute(mol, spin_label=other)
 
-            # compute its couplings, against its own previous step
-            if soc_on and nac_type == 'nacme':
-                other_nacme = NACME(mol)
-                if other_nacme.load_state_history(other):
-                    other_nacme.align_x()
-                    other_nacme.nacme(align=False, spin_label=other)
-
-        if soc_on:
-            # publish the phase-fixed amplitudes, then the coupling between them
-            soc.snapshot(other)
-            soc.coupling()
-
-def compute_data(mol):
-    from oqp.library.single_point import grad_request, response_manifold
-
-    soc_on = _soc_requested(mol)
-    label, other, requests = _spin_setup(mol)
-    grad_list = requests[label]
-    # Two ladders are published side by side whenever a second one was asked
-    # for, by its own selector or by spin-orbit coupling; only then does a file
-    # name have to say which manifold it holds.
-    per_manifold = soc_on or bool(requests[other])
-    spin_label = label if per_manifold else None
-
-    # compute energy
-    sp = SinglePoint(mol)
-
     with _configured_manifold(sp, label, per_manifold):
         # _single_gradient_target reads this ladder's request, so install it first
         with grad_request(mol, grad_list), _single_gradient_target(mol):
-            sp.energy()
+            if per_manifold:
+                sp.excitation(ref_energy)
+                soc.snapshot(label)
+            else:
+                # compute energy
+                sp.energy()
 
         # compute gradient, unless only the other ladder asked for one
         if grad_list or not per_manifold:
@@ -504,31 +545,9 @@ def compute_data(mol):
         if mol.config['properties']['nac'] == 'nac':
             NAC(mol).nac(spin_label=spin_label)
 
-    if requests[other] or soc_on:
-        other_grad_list = requests[other]
-        soc = _soc_driver(mol, sp=sp, ref_energy=[mol.mol_energy.energy])
-        # Record each ladder under its own label whenever two are solved, as
-        # compute_properties does: a later step reads its history from them.
-        soc.snapshot(label)
-
-        # compute the other spin manifold
-        with response_manifold(sp, other):
-            sp.excitation(soc.ref_energy)
-            # before LastStep saves the molecule
-            soc.snapshot(other)
-
-            # compute its gradient, if it requested one
-            if other_grad_list:
-                with grad_request(mol, other_grad_list):
-                    Gradient(mol).gradient()
-                    LastStep(mol).compute(mol, grad_list=other_grad_list,
-                                          spin_label=other)
-            else:
-                LastStep(mol).compute(mol, spin_label=other)
-
-        if soc_on:
-            # compute the coupling between the two recorded ladders
-            soc.coupling()
+    if soc_on:
+        # compute the coupling between the two recorded ladders
+        soc.coupling()
 
 
 def get_optimizer(mol):

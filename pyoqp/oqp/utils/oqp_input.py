@@ -2840,6 +2840,9 @@ def lower_to_legacy(
         method = "tdhf"
 
     states = list(_driver_states(spec.driver))
+    # Whether the driver itself named its states; a route default below is not
+    # a gradient request in a spin-orbit run (see the post-pass at the end).
+    driver_named_states = bool(states)
     if not states:
         default = _default_state(spec)
         if default is not None:
@@ -3184,12 +3187,18 @@ def lower_to_legacy(
     # soc=true) for the triplet one.  prop() takes one target state, so a deck
     # that wants both names the other ladder explicitly, e.g.
     # prop(S1) properties(soc=true, grad_t=2).
+    #
+    # Only states the driver named are requests: the route default that fills
+    # an empty prop()/data() is not, so prop(soc=true) properties(grad_t=2)
+    # asks for the triplet gradient alone.  An explicit properties(grad_s=...)
+    # or grad_t=... is the user's list for that ladder; a driver state that
+    # disagrees with it is a contradiction and is refused, never overwritten.
     properties = config.get("properties", {})
     if str(properties.get("soc", "")).strip().lower() in ("true", "1", "yes", "on") \
             and "grad" in properties:
         properties.pop("grad")
         by_key: Dict[str, List[int]] = {}
-        for state, root in zip(states, roots):
+        for state, root in zip(states if driver_named_states else [], roots):
             letter = (state.label or "S")[0].upper()
             if letter not in ("S", "T"):
                 raise OQPInputError(
@@ -3198,6 +3207,23 @@ def lower_to_legacy(
                     % state.label)
             by_key.setdefault("grad_s" if letter == "S" else "grad_t", []).append(root)
         for key, values in by_key.items():
+            if key in properties:
+                try:
+                    explicit = [int(item) for item in
+                                str(properties[key]).replace(",", " ").split()]
+                except ValueError:
+                    raise OQPInputError(
+                        "properties(%s=%s) must list integer response roots"
+                        % (key, properties[key])) from None
+                if sorted(set(values)) != sorted(set(explicit)):
+                    raise OQPInputError(
+                        "The %s gradient is requested twice with different "
+                        "roots: the driver state gives %s and properties(%s=%s) "
+                        "gives %s; name it in one place"
+                        % ("singlet" if key == "grad_s" else "triplet",
+                           ",".join(str(v) for v in values), key,
+                           properties[key], ",".join(str(v) for v in explicit)))
+                continue
             put("properties", key, ",".join(str(value) for value in values))
 
     # Defensive final pass: ConfigParser.load_dict requires strings.

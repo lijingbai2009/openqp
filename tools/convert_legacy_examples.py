@@ -44,6 +44,25 @@ def _load_oqp_input():
 
 
 oqp_input = _load_oqp_input()
+
+
+def _load_spin_states():
+    """Load the stdlib-only spin-ladder readers the drivers use."""
+
+    module_path = REPOSITORY_ROOT / "pyoqp" / "oqp" / "utils" / "spin_states.py"
+    module_name = "_openqp_example_spin_states"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:  # pragma: no cover - installation damage
+        raise RuntimeError("cannot load %s" % module_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+spin_states = _load_spin_states()
 CalculationSpec = oqp_input.CalculationSpec
 CallSpec = oqp_input.CallSpec
 StateRef = oqp_input.StateRef
@@ -485,9 +504,19 @@ def _driver_and_sections(
             # A spin-orbit run solves two ladders, so grad_s / grad_t name the
             # manifold each index belongs to; the shared selector is not read.
             if consumer.has("properties", "grad"):
-                raise ConversionError(
-                    "runtype=prop with properties.soc selects states through "
-                    "grad_s / grad_t, not grad")
+                # The schema default (root 0, i.e. no request) is legal in a
+                # spin-orbit deck and the checker accepts it; any other value
+                # is refused there too.
+                try:
+                    shared = spin_states.parse_states(consumer.pop("properties", "grad"))
+                except ValueError as exc:
+                    raise ConversionError("properties.grad must be a list of integers") from exc
+                if shared not in ([], [0]):
+                    raise ConversionError(
+                        "runtype=prop with properties.soc selects states through "
+                        "grad_s / grad_t, not grad")
+                warnings.append("dropped properties.grad=0 (its default; a spin-orbit "
+                                "run reads grad_s / grad_t)")
             singlets = _pop_roots(consumer, "grad_s")
             if len(singlets) > 1:
                 raise ConversionError(
@@ -743,12 +772,56 @@ def convert_file(
         raise ConversionError("rendered .oqp does not reparse: %s" % exc) from exc
     if oqp_input.render_canonical_oqp(reparsed) != text:
         raise ConversionError("rendered .oqp is not canonical/idempotent")
+    _check_ladder_requests_round_trip(source, reparsed)
     return ConversionResult(
         source=source,
         target=source.with_suffix(".oqp"),
         text=text,
         warnings=tuple(warnings),
     )
+
+
+def _ladder_requests(config: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
+    """What a deck asks of the spin ladders, as the drivers read it."""
+    view = {section: dict(values) for section, values in config.items()}
+    properties = view.setdefault("properties", {})
+    # Apply the schema default of the shared selector to both sides alike.
+    if not str(properties.get("grad", "")).strip():
+        properties["grad"] = "0"
+    view.setdefault("tdhf", {}).setdefault("multiplicity", "1")
+    try:
+        requests = spin_states.grad_requests(view)
+    except ValueError as exc:
+        raise ConversionError("unreadable gradient selector: %s" % exc) from exc
+    return {
+        "soc": spin_states.soc_requested(view),
+        "grad_s": requests["s"],
+        "grad_t": requests["t"],
+    }
+
+
+def _check_ladder_requests_round_trip(source: Path, spec: Any) -> None:
+    """A deck with a second spin ladder must lower back to the same requests.
+
+    The concise driver states, properties(grad_s/grad_t) and properties(soc)
+    are combined by lower_to_legacy; a conversion that changes which ladder
+    is differentiated, or adds a gradient the legacy deck never asked for,
+    would silently change the calculation.  Such a deck stays legacy-only.
+    """
+    legacy = _read_legacy(source)
+    legacy_properties = legacy.get("properties", {})
+    if not (str(legacy_properties.get("soc", "")).strip()
+            or "grad_s" in legacy_properties or "grad_t" in legacy_properties):
+        return
+    try:
+        lowered = oqp_input.lower_to_legacy(spec, source_dir=source.parent)
+    except Exception as exc:
+        raise ConversionError("rendered .oqp does not lower: %s" % exc) from exc
+    before, after = _ladder_requests(legacy), _ladder_requests(lowered)
+    if before != after:
+        raise ConversionError(
+            "the concise form would change the spin-ladder requests "
+            "(legacy %s, concise %s), so this deck stays legacy-only" % (before, after))
 
 
 def convert_all(examples_root: Path = DEFAULT_EXAMPLES_ROOT) -> ConversionRun:
