@@ -693,16 +693,20 @@ def dump_log(mol, title=None, section=None, info=None, must_print=False):
         loginfo += """
    PyOQP follow state:                 %14s %14s
    PyOQP mecp search algorithm:        %14s
-   PyOQP energy shift:                 %14.6f %14.6f %s
+   PyOQP mean energy (Hartree):        %14.8f
+   PyOQP search objective (Hartree):   %14.8f
+   PyOQP objective shift:              %14.6f %14.6f %s
    PyOQP energy gap:                   %14.6f %14.6f %s
    PyOQP rmsd step:                    %14.6f %14.6f %s
    PyOQP max step:                     %14.6f %14.6f %s
-   PyOQP rmsd grad:                    %14.6f %14.6f %s
-   PyOQP max grad:                     %14.6f %14.6f %s
+   PyOQP rmsd objective grad:          %14.6f %14.6f %s
+   PyOQP max objective grad:           %14.6f %14.6f %s
 
 """ % (
             state_i, state_j,
             info['mecp_search'],
+            info.get('energy', float('nan')),
+            info.get('objective', float('nan')),
             info['de'], info['energy_shift'], format_value(np.abs(info['de']) <= info['energy_shift']),
             info['gap'], info['energy_gap'], format_value(np.abs(info['gap']) <= info['energy_gap']),
             info['rmsd_step'], info['target_rmsd_step'], format_value(info['rmsd_step'] <= info['target_rmsd_step']),
@@ -1172,21 +1176,29 @@ def dump_data(mol, data, title=None, fpath='.'):
             out.write(status)
 
     if title == 'MECP':
-        itr, atoms, coordinates, energy, de, gap, rmsd_step, max_step, rmsd_grad, max_grad, rmsd_df2, max_df2 = data
+        # Energy is the mean 0.5 * (E_i + E_j) of the two crossing states.
+        # Objective is the function the search minimizes (Lagrangian or
+        # penalty); Obj Shift and the Obj G columns are its change and
+        # gradient, which the convergence test reads, and the Gap G columns
+        # the part of that gradient contributed by the gap term.
+        (itr, atoms, coordinates, energy, objective, de, gap, rmsd_step, max_step,
+         rmsd_grad, max_grad, rmsd_df2, max_df2) = data
         if itr == 1:
             mode = 'w'
-            status = """%5s %16s %16s %16s %14s %14s %14s %14s %14s %14s
---------------------------------------------------------------------------------------------------------------------------------------------------
+            status = """%5s %16s %16s %16s %16s %14s %14s %14s %14s %14s %14s
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
 """ % (
-                'Step', 'Energy', 'Shift', 'Gap', 'RMSD Step', 'Max Step', 'RMSD G', 'Max G', 'RMSD dG', 'Max dG'
+                'Step', 'Energy', 'Objective', 'Obj Shift', 'Gap', 'RMSD Step', 'Max Step',
+                'RMSD Obj G', 'Max Obj G', 'RMSD Gap G', 'Max Gap G'
             )
         else:
             mode = 'a'
             status = ''
 
         xyz = write_xyz(atoms, coordinates, (itr, energy))
-        status += '%5s %16.8f %16.8f %16.8f %14.6f %14.6f %14.6f %14.6f %14.6f %14.6f\n' % (
-            itr, energy, de, gap, rmsd_step, max_step, rmsd_grad, max_grad, rmsd_df2, max_df2
+        status += '%5s %16.8f %16.8f %16.8f %16.8f %14.6f %14.6f %14.6f %14.6f %14.6f %14.6f\n' % (
+            itr, energy, objective, de, gap, rmsd_step, max_step, rmsd_grad, max_grad,
+            rmsd_df2, max_df2
         )
 
         with open(f'{fpath}/opt.xyz', 'w') as out:

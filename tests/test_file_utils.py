@@ -465,5 +465,71 @@ class TestVerbosityInPythonLog(unittest.TestCase):
         self.assertEqual([line for line in text.splitlines() if line != line.rstrip()], [])
 
 
+class TestMECPStatusTable(unittest.TestCase):
+    """opt_status.txt keeps the mean energy and the search objective apart."""
+
+    def test_energy_column_is_the_mean_and_objective_has_its_own(self):
+        from tempfile import TemporaryDirectory
+
+        file_utils = load_file_utils()
+        atoms = np.array([[8], [1]])
+        coordinates = np.zeros(6)
+        # step 4 of the twisted-ethylene SQP MECP: mean -78.40055722,
+        # Lagrangian -78.52136313 at multiplier -53
+        rows = [
+            (1, atoms, coordinates, -78.39592156, -78.39592156, -78.39592156,
+             -0.00038109, 0.0, 0.0, 0.034120, 0.102155, 0.0, 0.0),
+            (4, atoms, coordinates, -78.40055722, -78.52136313, -0.12303000,
+             0.00228043, 0.038897, 0.080952, 0.355466, 0.734927,
+             0.353892, 0.730535),
+        ]
+        with TemporaryDirectory() as folder:
+            for row in rows:
+                file_utils.dump_data(types.SimpleNamespace(), row,
+                                     title="MECP", fpath=folder)
+            lines = (Path(folder) / "opt_status.txt").read_text().splitlines()
+            comment = (Path(folder) / "opt.xyz").read_text().splitlines()[1]
+
+        header = lines[0].split()
+        self.assertEqual(header[:5],
+                         ["Step", "Energy", "Objective", "Obj", "Shift"])
+        step4 = lines[-1].split()
+        self.assertEqual(step4[0], "4")
+        self.assertAlmostEqual(float(step4[1]), -78.40055722, places=8)
+        self.assertAlmostEqual(float(step4[2]), -78.52136313, places=8)
+        self.assertAlmostEqual(float(step4[3]), -0.12303000, places=8)
+        self.assertAlmostEqual(float(step4[4]), 0.00228043, places=8)
+        self.assertEqual(len(step4), 11)
+        # the geometry comment carries the energy, not the objective
+        self.assertIn("-78.40055722", comment)
+
+    def test_convergence_block_names_the_objective(self):
+        from tempfile import TemporaryDirectory
+
+        file_utils = load_file_utils()
+        metrics = {
+            "istate": 1, "jstate": 1, "nstate": 5, "mecp_search": "sqp",
+            "energy": -78.40055722, "objective": -78.52136313,
+            "de": -0.12303, "energy_shift": 1.0e-6,
+            "gap": 0.00228043, "energy_gap": 1.0e-5,
+            "rmsd_step": 0.038897, "target_rmsd_step": 1.0e-3,
+            "max_step": 0.080952, "target_max_step": 2.0e-3,
+            "rmsd_grad": 0.355466, "target_rmsd_grad": 1.0e-4,
+            "max_grad": 0.734927, "target_max_grad": 3.0e-4,
+        }
+        with TemporaryDirectory() as folder:
+            log = Path(folder) / "mecp-convergence.log"
+            mol = minimal_log_mol(log)
+            mol.config["optimize"] = {"imult": 1, "jmult": 3}
+            file_utils.dump_log(mol, title="Geometry Optimization Convergence 4",
+                                section="mecp", info=metrics)
+            text = log.read_text()
+
+        self.assertIn("PyOQP mean energy (Hartree):          -78.40055722", text)
+        self.assertIn("PyOQP search objective (Hartree):     -78.52136313", text)
+        self.assertIn("PyOQP objective shift:", text)
+        self.assertNotIn("PyOQP energy shift:", text)
+
+
 if __name__ == "__main__":
     unittest.main()
