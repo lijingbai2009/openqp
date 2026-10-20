@@ -292,7 +292,7 @@ def test_periodic_solute_centre_is_made_whole_through_its_bonds():
     options = dict(alpha=0.6, temperature=300.0, anchor=0,
                    center=("atoms", [0, 1, 2]))
     bonded = FlexiBLEBoundary([[3, 4, 5]], [[6, 7, 8], [9, 10, 11]], masses,
-                              center_bonds=[(0, 1), (1, 2)], **options)
+                              bonds=[(0, 1), (1, 2)], **options)
     reference, reference_force = bonded.evaluate(whole)
     energy, force = bonded.evaluate(wrapped, box=box)
     assert reference > 1.0e-8
@@ -310,6 +310,44 @@ def test_periodic_solute_centre_is_made_whole_through_its_bonds():
     unbonded = FlexiBLEBoundary([[3, 4, 5]], [[6, 7, 8], [9, 10, 11]],
                                 masses, **options)
     assert abs(unbonded.evaluate(wrapped, box=box)[0] - reference) > 1.0e-8
+
+
+def test_periodic_com_anchors_are_made_whole_through_their_bonds():
+    """Review case for anchor=com: chains spanning 16 bohr in a 30-bohr cell,
+    the last atom of each stored one cell away.  Unwrapping along the bonds
+    reproduces the unwrapped nonperiodic energy and forces; imaging against
+    the first atom of each molecule does not."""
+    box = np.full(3, 30.0)
+    masses = np.tile([12.0, 14.0, 16.0], 3)
+    whole = np.array([
+        [0.0, 0.3, 0.1], [8.1, -0.2, 0.4], [16.0, 0.5, -0.3],     # QM
+        [1.9, 5.2, 0.6], [9.2, 4.6, 1.1], [17.3, 5.4, 0.2],       # MM
+        [0.8, -6.3, -0.4], [7.2, -5.6, 0.3], [15.1, -6.6, 0.9],   # MM
+    ])
+    wrapped = whole.copy()
+    wrapped[[2, 5, 8], 0] -= 30.0
+    options = dict(alpha=0.4, temperature=300.0, anchor=None,
+                   center=("point", np.array([8.4, 0.2, 0.1])))
+    molecules = ([[0, 1, 2]], [[3, 4, 5], [6, 7, 8]])
+    bonded = FlexiBLEBoundary(*molecules, masses,
+                              bonds=[(0, 1), (1, 2), (3, 4), (4, 5),
+                                     (6, 7), (7, 8)], **options)
+    reference, reference_force = bonded.evaluate(whole)
+    energy, force = bonded.evaluate(wrapped, box=box)
+    assert reference > 1.0e-8
+    assert abs(energy - reference) < 1.0e-15
+    assert np.max(np.abs(force - reference_force)) < 1.0e-14
+    h = 1.0e-6
+    for atom, axis in ((2, 0), (4, 1), (8, 2)):
+        plus, minus = wrapped.copy(), wrapped.copy()
+        plus[atom, axis] += h
+        minus[atom, axis] -= h
+        fd = -(bonded.evaluate(plus, box=box)[0]
+               - bonded.evaluate(minus, box=box)[0])/(2.0*h)
+        assert abs(fd - force[atom, axis]) < 1.0e-9
+    # imaged against their first atoms the anchors move by 10 bohr
+    unbonded = FlexiBLEBoundary(*molecules, masses, **options)
+    assert abs(unbonded.evaluate(wrapped, box=box)[0] - reference) > 1.0e-6
 
 
 def test_partition_explosion_is_refused_not_hidden():

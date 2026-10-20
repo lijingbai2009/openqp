@@ -62,18 +62,18 @@ class FlexiBLEBoundary:
     mass.  ``center`` is ``("point", xyz_bohr)``, ``("atoms", indices)`` for
     the centre of mass of those atoms, or ``("molecules", None)`` for the
     centre of mass of all QM and MM molecules of this kind (the reference
-    kernel's spherical boundary).  ``center_bonds`` lists atom pairs (for
-    example all bonds of the topology) through which the centre atoms are
-    made whole in a periodic cell; without it, or for a centre atom that is
-    not bonded to the first one, the atom is placed at the minimum image of
-    the first centre atom.
+    kernel's spherical boundary).  ``bonds`` lists atom pairs (for example
+    all bonds of the topology) through which the centre atoms and, for
+    ``anchor=None``, every molecule are made whole in a periodic cell;
+    without it, or for an atom not bonded to the first atom of its group, the
+    atom is placed at the minimum image of that first atom.
     """
 
     def __init__(self, qm_molecules, mm_molecules, masses, *, alpha,
                  temperature, anchor=0, center=("molecules", None),
                  threshold=0.01, scale=0.1, max_iterations=20,
                  keep_below_threshold=False, max_partitions=200000,
-                 center_bonds=None):
+                 bonds=None):
         self.qm = [np.asarray(m, dtype=np.int64) for m in qm_molecules]
         self.mm = [np.asarray(m, dtype=np.int64) for m in mm_molecules]
         if not self.qm or not self.mm:
@@ -137,8 +137,15 @@ class FlexiBLEBoundary:
             raise ValueError(f"unknown FlexiBLE centre {kind!r}")
         self.center_kind = kind
         self.center_value = value
-        self.center_path = (self._unwrap_path(value, center_bonds)
+        neighbours = {}
+        for i, j in (bonds if bonds is not None else ()):
+            neighbours.setdefault(int(i), []).append(int(j))
+            neighbours.setdefault(int(j), []).append(int(i))
+        self.center_path = (self._unwrap_path(value, neighbours)
                             if kind == "atoms" else None)
+        self.molecule_paths = (
+            [self._unwrap_path(m, neighbours) for m in self.molecules]
+            if self.anchor is None else None)
         self.last = None
 
     # ------------------------------------------------------------------
@@ -152,23 +159,19 @@ class FlexiBLEBoundary:
         return vector - box*np.round(vector/box)
 
     @staticmethod
-    def _unwrap_path(atoms, bonds):
-        """(parent, child) steps that make the centre atoms whole.
+    def _unwrap_path(atoms, neighbours):
+        """(parent, child) steps that make a group of atoms whole.
 
-        A breadth-first tree over ``bonds`` from the first centre atom; only
-        the steps on the tree paths to centre atoms are kept, in tree order.
-        A centre atom the bonds do not reach is stepped to directly from the
-        first centre atom (its minimum image about that atom).
+        A breadth-first tree over the bond graph ``neighbours`` from the first
+        atom of the group; only the steps on the tree paths to group atoms
+        are kept, in tree order.  An atom the bonds do not reach is stepped
+        to directly from the first atom (its minimum image about that atom).
         """
         root = int(atoms[0])
         targets = set(int(a) for a in atoms)
         parent = {root: None}
         order = [root]
-        if bonds is not None:
-            neighbours = {}
-            for i, j in bonds:
-                neighbours.setdefault(int(i), []).append(int(j))
-                neighbours.setdefault(int(j), []).append(int(i))
+        if neighbours:
             head = 0
             while head < len(order) and not targets.issubset(parent):
                 atom = order[head]
@@ -192,22 +195,28 @@ class FlexiBLEBoundary:
             return self.center_value, None
         atoms = self.center_value
         weights = self.masses[atoms]/np.sum(self.masses[atoms])
+        return weights @ self._whole(xyz, atoms, self.center_path, box), (
+            atoms, weights)
+
+    def _whole(self, xyz, atoms, path, box):
+        """Positions of ``atoms`` made whole along their bond ``path``.
+
+        A lattice translation of one atom does not change its force, so
+        weights formed from these positions apply to the raw atoms.
+        """
         if box is None:
-            return weights @ xyz[atoms], (atoms, weights)
-        # made whole along the bond path (a lattice translation of one atom
-        # does not change its force, so the weights apply to the raw atoms)
+            return xyz[atoms]
         whole = {int(atoms[0]): xyz[atoms[0]]}
-        for parent, child in self.center_path:
+        for parent, child in path:
             whole[child] = whole[parent] + self._image(
                 xyz[child] - xyz[parent], box)
-        positions = np.asarray([whole[int(a)] for a in atoms])
-        return weights @ positions, (atoms, weights)
+        return np.asarray([whole[int(a)] for a in atoms])
 
     def _anchors(self, xyz, box):
         """Anchor position of every molecule and its atom weights."""
         rows = []
         weights = []
-        for molecule in self.molecules:
+        for index, molecule in enumerate(self.molecules):
             if self.anchor is not None:
                 rows.append(xyz[molecule[self.anchor]])
                 w = np.zeros(len(molecule))
@@ -215,8 +224,8 @@ class FlexiBLEBoundary:
             else:
                 m = self.masses[molecule]
                 w = m/np.sum(m)
-                offsets = self._image(xyz[molecule] - xyz[molecule[0]], box)
-                rows.append(xyz[molecule[0]] + w @ offsets)
+                rows.append(w @ self._whole(
+                    xyz, molecule, self.molecule_paths[index], box))
             weights.append(w)
         return np.asarray(rows), weights
 
