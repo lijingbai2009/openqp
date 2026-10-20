@@ -139,7 +139,8 @@ flexible(enabled=true, alpha=5.0, temperature=300, center=solute, atoms="0-11", 
 alpha lets very many partitions contribute and the run stops with an error
 rather than enumerating them. `temperature` is the kT of the potential and is
 set explicitly. `center=solute` uses the centre of mass of `atoms` (0-based;
-by default the QM atoms that are not solvent), `center=point` the fixed
+by default the QM atoms that are not solvent; in a periodic cell made whole
+along the topology bonds), `center=point` the fixed
 `point` in angstrom, and `center=molecules` the centre of mass of all
 solvent molecules (non-periodic only). Periodic runs (`cutoff=PME`) use the
 minimum-image distance and stop when a QM solvent molecule is not closer than

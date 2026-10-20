@@ -1324,7 +1324,9 @@ class NAMD:
             anchor=anchors.pop(), center=center,
             threshold=self.flexible_threshold, scale=self.flexible_scale,
             max_iterations=self.flexible_max_iterations,
-            keep_below_threshold=self.flexible_keep_below)
+            keep_below_threshold=self.flexible_keep_below,
+            center_bonds=[(int(bond[0].index), int(bond[1].index))
+                          for bond in topology.bonds()])
 
     def _restraint_box(self):
         """Orthorhombic cell (bohr) for coordinate-based restraints; None

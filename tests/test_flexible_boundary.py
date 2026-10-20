@@ -270,6 +270,48 @@ def test_review_case_qm_anchor_at_the_centre_mm_anchor_at_2p7_bohr():
     assert abs(fd - force[1, 0]) < 1.0e-6*expected
 
 
+def test_periodic_solute_centre_is_made_whole_through_its_bonds():
+    """Review case: a bonded solute longer than half the cell.
+
+    Centre atoms at x = 0, 8, 16 bohr in a 30-bohr cell, the last one stored
+    wrapped at -14.  Imaging every centre atom against the first one puts
+    the centre at x = -2 instead of 8; unwrapping along the bonds 0-1-2
+    reproduces the energy and forces of the unwrapped, nonperiodic system.
+    """
+    box = np.full(3, 30.0)
+    masses = np.array([12.0, 14.0, 16.0] + [16.0, 1.0, 1.0]*3)
+    whole = np.array([
+        [0.0, 0.4, -0.3], [8.0, -0.6, 0.2], [16.0, 0.9, 0.5],     # solute
+        [9.1, 3.2, 0.4], [10.6, 3.9, 0.4], [8.6, 4.6, 0.9],       # QM water
+        [7.4, -6.1, 1.3], [7.9, -7.6, 1.8], [6.0, -6.3, 0.2],     # MM water
+        [13.8, 5.7, 2.2], [15.2, 6.4, 2.0], [13.1, 6.1, 3.6],     # MM water
+    ])
+    wrapped = whole.copy()
+    wrapped[2, 0] -= 30.0
+    wrapped[9:12] += np.array([30.0, -30.0, 0.0])
+    options = dict(alpha=0.6, temperature=300.0, anchor=0,
+                   center=("atoms", [0, 1, 2]))
+    bonded = FlexiBLEBoundary([[3, 4, 5]], [[6, 7, 8], [9, 10, 11]], masses,
+                              center_bonds=[(0, 1), (1, 2)], **options)
+    reference, reference_force = bonded.evaluate(whole)
+    energy, force = bonded.evaluate(wrapped, box=box)
+    assert reference > 1.0e-8
+    assert abs(energy - reference) < 1.0e-15
+    assert np.max(np.abs(force - reference_force)) < 1.0e-14
+    h = 1.0e-6
+    for atom, axis in ((2, 0), (0, 1), (4, 2)):
+        plus, minus = wrapped.copy(), wrapped.copy()
+        plus[atom, axis] += h
+        minus[atom, axis] -= h
+        fd = -(bonded.evaluate(plus, box=box)[0]
+               - bonded.evaluate(minus, box=box)[0])/(2.0*h)
+        assert abs(fd - force[atom, axis]) < 1.0e-9
+    # without the bonds the centre lands at the wrong image
+    unbonded = FlexiBLEBoundary([[3, 4, 5]], [[6, 7, 8], [9, 10, 11]],
+                                masses, **options)
+    assert abs(unbonded.evaluate(wrapped, box=box)[0] - reference) > 1.0e-8
+
+
 def test_partition_explosion_is_refused_not_hidden():
     xyz = _cluster(19)
     boundary = _solute_boundary(xyz, nqm=8, swaps=1, alpha=0.05,
