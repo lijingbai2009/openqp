@@ -2313,7 +2313,7 @@ class Hessian(Calculator):
             'property_kernels': 'electric_dipole_au,cphf_static_polarizability,vibrational_intensities_native',
             'displacement_bohr': float(displacement) if backend != 'native_openqp_analytic' else 0.0,
             'ir_units': 'km/mol',
-            'raman_units': 'a.u.',
+            'raman_units': 'bohr^4/amu',
         }
 
     def analytical_hess(self):

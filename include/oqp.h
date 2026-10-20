@@ -13,6 +13,11 @@ void oqp_simplex_qp_solve_avoid(int64_t n, const double *h, const double *g,
 void oqp_ecp_selftest(double *err);
 void mrsf_pair_selftest(double *error, int32_t *checks, int32_t *failures);
 
+/* Internal self-test of the tagarray create status -> oqp_alloc return code
+   mapping (tests/fortran/oqp_alloc_status_selftest.F90). */
+void oqp_alloc_status_selftest(int64_t nmax, int32_t *statuses, int64_t *codes,
+                               int64_t *n);
+
 /* Internal TDHF Davidson residual self-test (tests/fortran/rpa_residual_selftest.F90).
    Arrays are column-major: w_l, w_r, v_l, v_r (n, ndsr); q (n, ndsr, 2). */
 void oqp_rpa_residual_selftest(int64_t n, int64_t ndsr, int64_t imax,
