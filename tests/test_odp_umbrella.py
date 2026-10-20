@@ -330,6 +330,17 @@ for trial in range(12):
                - odp.evaluate(minus, box=box)["energy"])/(2*h)
         max_fd = max(max_fd, abs(fd - periodic["force"][atom, axis]))
 
+diagonal = np.zeros((8, 3))
+diagonal[1] = [0.0, 0.0, 0.0]
+diagonal[4] = [0.4*23.0, 0.4*23.0, 0.0]
+diagonal[6] = [0.4*23.0 + 1.3, 0.4*23.0 - 0.7, 0.9]
+cube = np.array([23.0, 23.0, 23.0])
+try:
+    odp.evaluate(diagonal, box=cube)
+    diagonal_ok = True
+except RuntimeError:
+    diagonal_ok = False
+
 too_wide = whole.copy()
 too_wide[6] = whole[1] + np.array([11.6, 0.0, 0.0])
 refusal = None
@@ -359,7 +370,7 @@ cluster_force, cluster_energy = cluster._apply_odp_to_force_energy(
 raw = odp.evaluate(wrapped)
 print("PBC=" + json.dumps({
     "max_energy": max_energy, "max_xi": max_xi, "max_force": max_force,
-    "max_fd": max_fd, "refusal": refusal,
+    "max_fd": max_fd, "refusal": refusal, "diagonal_ok": diagonal_ok,
     "namd_energy": energy - (-2.5 + direct["energy"]),
     "namd_force": float(np.max(np.abs(force - direct["force"]))),
     "namd_unbiased": namd._unbiased_potential_energy,
@@ -383,7 +394,10 @@ print("PBC=" + json.dumps({
     assert values["max_xi"] < 1.0e-12
     assert values["max_force"] < 1.0e-12
     assert values["max_fd"] < 2.0e-8
-    assert "half the shortest box length" in values["refusal"]
+    assert "not less than half the box length" in values["refusal"]
+    # a diagonal pair separation of (0.4 L, 0.4 L, 0) has a unique minimum
+    # image although its norm exceeds half the box
+    assert values["diagonal_ok"] is True
     assert values["namd_energy"] == 0.0
     assert values["namd_force"] == 0.0
     assert values["namd_unbiased"] == -2.5

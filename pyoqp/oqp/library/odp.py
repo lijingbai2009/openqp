@@ -165,17 +165,29 @@ class ODPUmbrella:
                 f"[odp] CV atom {largest} is outside the {natom}-atom MD system"
             )
 
+    def _cv_pairs(self):
+        """0-based atom pairs whose separation vectors the native CVs use."""
+        pairs = []
+        for cv_type, atoms in zip(self.cv_types, self.cv_atoms):
+            if cv_type == 1:                          # distance(i,j)
+                pairs.append((atoms[0], atoms[1]))
+            elif cv_type == 2:                        # r(i,j) - r(k,l)
+                pairs += [(atoms[0], atoms[1]), (atoms[2], atoms[3])]
+            else:                                     # angle(i,j,k), vertex j
+                pairs += [(atoms[0], atoms[1]), (atoms[2], atoms[1])]
+        return pairs
+
     def minimum_image_coordinates(self, coordinates, box):
         """Place the CV atoms of a periodic cell at one consistent image.
 
         Every CV atom is moved by a lattice vector to the minimum image of the
         first CV atom.  The native kernel then measures each CV from these
-        Cartesian positions, which equals the minimum-image CV only when every
-        pair of CV atoms is closer than half the shortest orthorhombic box
-        length after this placement; otherwise a CV would be measured across
-        the wrong image and the evaluation is refused.  A lattice translation
-        does not change a force, so the returned force applies to the raw
-        atoms unchanged.
+        Cartesian positions.  That equals the minimum-image CV only when every
+        atom pair a CV uses is itself at its minimum image after this
+        placement, i.e. each Cartesian component of the pair separation is
+        shorter than half the box length along that axis; otherwise the
+        evaluation is refused.  A lattice translation does not change a
+        force, so the returned force applies to the raw atoms unchanged.
         """
         xyz = np.array(coordinates, dtype=np.float64, copy=True)
         box = np.asarray(box, dtype=np.float64).reshape(-1)
@@ -186,15 +198,17 @@ class ODPUmbrella:
         shifted = xyz[used] - reference
         shifted -= box*np.round(shifted/box)
         xyz[used] = reference + shifted
-        pairs = shifted[:, None, :] - shifted[None, :, :]
-        separation = float(np.max(np.linalg.norm(pairs, axis=-1)))
-        half = 0.5*float(np.min(box))
-        if separation >= half:
-            raise RuntimeError(
-                f"[odp] CV atoms span {separation:.6g} bohr, not less than half "
-                f"the shortest box length ({half:.6g} bohr); the minimum image "
-                "of each CV is ambiguous. Enlarge the cell or choose CV atoms "
-                "that stay together.")
+        for i, j in self._cv_pairs():
+            component = np.abs(xyz[j] - xyz[i])
+            if np.any(component >= 0.5*box):
+                axis = int(np.argmax(component/box))
+                raise RuntimeError(
+                    f"[odp] CV atoms {i + 1} and {j + 1} are {component[axis]:.6g} "
+                    f"bohr apart along axis {'xyz'[axis]}, not less than half the "
+                    f"box length ({0.5*box[axis]:.6g} bohr) once all CV atoms are "
+                    "placed at one image; the minimum image of the CV is "
+                    "ambiguous. Enlarge the cell or choose CV atoms that stay "
+                    "together.")
         return xyz
 
     def evaluate(self, coordinates, box=None):

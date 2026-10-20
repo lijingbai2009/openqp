@@ -21,8 +21,8 @@ and warns that WHAM assumes canonical sampling.
 
 ODP also runs in periodic QM/MM (`qmmm(cutoff=PME)`, orthorhombic cell). Each
 CV is measured at its minimum image: all CV atoms are placed at the image
-nearest the first CV atom, and the run stops if two CV atoms are then not
-closer than half the shortest box length.
+nearest the first CV atom, and the run stops if an atom pair used by a CV is
+then not closer than half the box length along some axis.
 
 To exercise checkpoint continuation end to end, run:
 
