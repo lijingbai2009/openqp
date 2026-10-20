@@ -356,22 +356,40 @@ angle_reference = angle.evaluate(unwrapped_angle)
 angle_error = abs(angle_periodic["energy"] - angle_reference["energy"]) + float(
     np.max(np.abs(angle_periodic["force"] - angle_reference["force"])))
 
-# a closed triangle of distance CVs that no image assignment satisfies:
-# 1-2 and 2-3 are 0.45 L each along x, so 1-3 cannot also be a minimum image
-triangle = ODPUmbrella({
-    "enabled": True, "cv": "distance(1,2); distance(2,3); distance(1,3)",
-    "scale": [1.0, 1.0, 1.0], "reference_r": [1.0, 1.0, 1.0],
-    "reference_p": [2.0, 2.0, 2.0], "center": 0.5, "k_parallel": 0.1,
-    "k_perpendicular": 0.0})
-loop = np.array([[0.0, 0.0, 0.0], [0.45*23.0, 0.3, 0.0], [0.9*23.0, 0.0, 0.4]])
-refusal = None
-try:
-    triangle.evaluate(loop, box=np.array([23.0, 23.0, 23.0]))
-except RuntimeError as exc:
-    refusal = str(exc)
-
 def image(vector, cell):
     return vector - cell*np.round(vector/cell)
+
+# A ring of distance CVs that winds around the cell (review case: x = 0, 4,
+# -4 in a 10-bohr box; minimum-image lengths 4, 2, 4) has no common Cartesian
+# embedding, yet every CV is unambiguous: each must take its own
+# minimum-image value, and the folded force must be the energy derivative.
+triangle = ODPUmbrella({
+    "enabled": True, "cv": "distance(1,2); distance(2,3); distance(3,1)",
+    "scale": [1.0, 0.7, 1.3], "reference_r": [3.0, 1.5, 3.5],
+    "reference_p": [4.5, 2.5, 4.0], "center": 0.4, "k_parallel": 0.1,
+    "k_perpendicular": 0.03})
+ring_box = np.array([10.0, 10.0, 10.0])
+loop = np.array([[0.0, 0.0, 0.0], [4.0, 0.3, -0.2], [-4.0, 0.5, 0.4]])
+ring = triangle.evaluate(loop, box=ring_box)
+ring_expected = [float(np.linalg.norm(image(loop[j] - loop[i], ring_box)))
+                 for i, j in ((0, 1), (1, 2), (2, 0))]
+ring_cv = float(np.max(np.abs(ring["cv_raw"] - ring_expected)))
+ring_fd = 0.0
+for atom in range(3):
+    for axis in range(3):
+        plus = loop.copy(); plus[atom, axis] += 1.0e-6
+        minus = loop.copy(); minus[atom, axis] -= 1.0e-6
+        fd = -(triangle.evaluate(plus, box=ring_box)["energy"]
+               - triangle.evaluate(minus, box=ring_box)["energy"])/2.0e-6
+        ring_fd = max(ring_fd, abs(fd - ring["force"][atom, axis]))
+
+# exactly half the box apart along x: two minimum images, refused
+refusal = None
+try:
+    triangle.evaluate(np.array([[0.0, 0.0, 0.0], [5.0, 0.3, 0.0],
+                                [2.0, 1.0, 0.0]]), box=ring_box)
+except RuntimeError as exc:
+    refusal = str(exc)
 
 # Atoms 2 and 7 are 11.6 bohr apart along x (more than half of 23) but no CV
 # uses that pair; each CV, measured along its own pairs 5-2 and 5-7, equals
@@ -420,6 +438,7 @@ raw = odp.evaluate(wrapped)
 print("PBC=" + json.dumps({
     "max_energy": max_energy, "max_xi": max_xi, "max_force": max_force,
     "max_fd": max_fd, "refusal": refusal, "diagonal_ok": diagonal_ok,
+    "ring_cv": ring_cv, "ring_fd": ring_fd,
     "angle_error": angle_error,
     "far_ends_cv": far_ends_cv, "apart_cv": apart_cv,
     "namd_energy": energy - (-2.5 + direct["energy"]),
@@ -445,7 +464,10 @@ print("PBC=" + json.dumps({
     assert values["max_xi"] < 1.0e-12
     assert values["max_force"] < 1.0e-12
     assert values["max_fd"] < 2.0e-8
-    assert "not less than half the box length" in values["refusal"]
+    assert "exactly half the box length" in values["refusal"]
+    # a ring of CVs winding around the cell: each CV at its own minimum image
+    assert values["ring_cv"] < 1.0e-12
+    assert values["ring_fd"] < 2.0e-8
     assert values["angle_error"] < 1.0e-12
     assert values["far_ends_cv"] < 1.0e-12
     assert abs(values["apart_cv"][0] - 1.0) < 1.0e-12

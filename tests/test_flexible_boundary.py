@@ -293,6 +293,11 @@ def test_invalid_settings_and_hopeless_partition_are_rejected():
         FlexiBLEBoundary([[0, 1, 2]], [[3, 4, 5]],
                          np.array([16.0, 1.0, 0.0, 16.0, 1.0, 0.0]),
                          alpha=1.0, temperature=300.0, anchor=2)
+    # a centre made only of massless (virtual) sites has no centre of mass
+    with pytest.raises(ValueError, match="positive total mass"):
+        FlexiBLEBoundary([[0, 1, 2]], [[3, 4, 5]],
+                         np.array([16.0, 1.0, 0.0, 16.0, 1.0, 0.0, 0.0]),
+                         alpha=1.0, temperature=300.0, center=("atoms", [6]))
     # the QM molecule far outside the MM one: h(actual) underflows
     boundary = FlexiBLEBoundary(
         [[0, 1, 2]], [[3, 4, 5]], masses, alpha=5.0, temperature=300.0,

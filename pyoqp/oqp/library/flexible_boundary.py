@@ -118,6 +118,12 @@ class FlexiBLEBoundary:
             value = np.asarray(value, dtype=np.int64).reshape(-1)
             if value.size == 0:
                 raise ValueError("FlexiBLE centre atoms are empty")
+            # the centre is mass-weighted; massless (virtual) sites alone
+            # would give NaN weights
+            if not np.sum(masses[value]) > 0.0:
+                raise ValueError(
+                    "FlexiBLE centre atoms must have a positive total mass; "
+                    "massless (virtual) sites cannot define the centre")
         elif kind == "molecules":
             value = np.concatenate(self.molecules)
             # (rejected for a periodic cell in evaluate: the centre of mass
