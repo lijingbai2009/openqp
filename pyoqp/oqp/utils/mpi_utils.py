@@ -78,7 +78,9 @@ class MPIManager:
                 if cls._instance.rank != 0:
                     sys.stdout = open(os.devnull, 'w')
             else:
-                print(f"Failed to import mpi4py")
+                # Diagnostic, not output: stdout of an `import oqp` process
+                # is data (JSON, tables) that callers parse.
+                print("Failed to import mpi4py", file=sys.stderr)
                 cls._instance = super(MPIManager, cls).__new__(cls)
                 cls._instance.rank = 0
                 cls._instance.size = 1
@@ -103,7 +105,7 @@ class MPIManager:
                 self.comm.Barrier()
                 MPI.Finalize()
             except Exception as err:
-                print(f"Failed to finalize MPI: {str(err)}")
+                print(f"Failed to finalize MPI: {err}", file=sys.stderr)
 
     def set_mpi_comm(self, data):
         """Publish the CURRENT communicator to the native control struct.
