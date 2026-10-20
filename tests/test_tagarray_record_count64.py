@@ -8,8 +8,11 @@ then crashed on its first write.  ``external/fix_tagarray_count64.py`` carries
 the upstream fix until a tagarray release contains it.
 
 The probe shape (2^32 + 3, 2^61 + 1) has more elements than int64_t can
-count, so a correct library refuses it before allocating anything and
-``oqp_alloc`` returns -3 (create refused).  A 32-bit
+count, so a correct library refuses it before allocating anything
+(DATA_INCORRECT_DIMENSIONS) and ``oqp_alloc`` returns -3 (create refused).
+A real allocation failure (MEMORY_ALLOCATION_ERROR) maps to -2 instead; see
+``test_native_create_status_maps_to_alloc_code`` in
+``test_oqpdata_setitem_errors.py``.  A 32-bit
 accumulator wraps it to 3 elements, so a library with the defect allocates 24
 bytes and reports success.  Neither case allocates real memory, so the test is
 safe on every CI runner.
