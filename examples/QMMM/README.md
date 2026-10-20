@@ -94,6 +94,7 @@ Minimal nonadiabatic-dynamics demonstrations on formaldehyde (QM) solvated by
 | `ala-dipeptide_RHF-QMMM-OPT-linkatom.inp` | **QM/MM geometry optimisation** across the same covalent boundary (RHF/6-31G): minimises the embedded QM/MM energy over the QM atoms with the MM fixed (`[optimize] qmmm_radius=0`), 12 steps, writes the full-system PDB. |
 | `ala-dipeptide_RHF-QMMM-OPT-constraints.inp` | **QM/MM optimisation with held bonds**: as above, with the MM atoms within 3 Å of the QM region free to move (`[optimize] qmmm_radius=3.0`) and their X–H bond lengths held by `[qmmm] constraints=HBonds` (frozen distances in the native optimizer), 6 steps; writes the geometry to the file named by `[optimize] qmmm_output`. |
 | `ala-box_BHHLYP-MRSF-NAMD-QMMM-PME.inp` | The same boundary in a **periodic TIP3P box** (`cutoff=PME`, Ewald QM/MM electrostatics with the self-consistent QM-image term) exercising `ewald_tol`, `lj_switch`, `h_lj` and `mm_charge_width`. |
+| `ala-box_BHHLYP-MRSF-NAMD-QMMM-PME-FLEXIBLE-ODP.oqp` | The periodic box with water HOH 76 moved into the QM region, kept there by the FlexiBLE boundary (`flexible(...)`), sampled as one ODP umbrella window (`odp(...)`) in Langevin NVT: the setup for QM/MM free energies of solvent-involving reactions. |
 
 To exercise checkpoint loading, select the semantic examples in the regression
 runner. It gives the producer and continuation the same project directory and

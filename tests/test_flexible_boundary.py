@@ -429,3 +429,51 @@ def test_periodic_pme_namd_qmmm_flexible_boundary_uses_the_cell(tmp_path):
     for xyz, recorded in zip(values["frames"], values["restraint"]):
         energy, _force = boundary.evaluate(np.asarray(xyz), box=box)
         assert abs(energy - recorded) < 1.0e-12
+
+
+def test_flexible_boundary_and_odp_window_example_runs_together(tmp_path):
+    """examples/QMMM/ala-box_BHHLYP-MRSF-NAMD-QMMM-PME-FLEXIBLE-ODP.oqp"""
+    pytest.importorskip("openmm")
+    import shutil
+    import subprocess
+    import sys
+
+    from oqp_module_isolation import child_env
+    name = "ala-box_BHHLYP-MRSF-NAMD-QMMM-PME-FLEXIBLE-ODP"
+    example = ROOT / "examples" / "QMMM"
+    shutil.copy(example / f"{name}.oqp", tmp_path)
+    shutil.copy(example / "ala_box.pdb", tmp_path)
+    result = _run_deck(tmp_path / f"{name}.oqp", tmp_path)
+    if result.returncode != 0:
+        if "cannot load" in result.stderr or "No module named" in result.stderr:
+            pytest.skip("compiled OpenQP runtime is not available")
+        pytest.fail(result.stdout[-4000:] + result.stderr[-4000:])
+    script = (
+        "import json,sys,warnings\n"
+        "import numpy as np\n"
+        "from oqp.library.namd import read_namd_trajectory\n"
+        "from oqp.library.odp import odp_wham\n"
+        "h,r=read_namd_trajectory(sys.argv[1])\n"
+        "with warnings.catch_warnings():\n"
+        "    warnings.simplefilter('error')\n"
+        "    w=odp_wham([sys.argv[1]],300.0,bins=3)\n"
+        "print(json.dumps({'ensemble':h['ensemble'],"
+        "'flexible':h['independent_controls']['flexible'],"
+        "'window':h['odp']['window'],'steps':r['step'].tolist(),"
+        "'restraint':r['conservative_restraint_energy_hartree'].tolist(),"
+        "'bias':r['odp_bias_hartree'].tolist(),"
+        "'wham_warning':w['ensemble_warning']}))\n")
+    inspection = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / f"{name}.namd.trj")],
+        env=child_env(), capture_output=True, text=True, check=False)
+    if inspection.returncode != 0:
+        pytest.fail(inspection.stdout + inspection.stderr)
+    values = json.loads(inspection.stdout.splitlines()[-1])
+    assert values["ensemble"] == "NVT"
+    assert values["flexible"]["qm_molecules"] == 1
+    assert values["flexible"]["mm_molecules"] == 105
+    assert values["window"] == 1
+    assert values["steps"] == [0, 1, 2]
+    assert min(values["restraint"]) > 1.0e-6
+    assert min(values["bias"]) > 1.0e-6
+    assert values["wham_warning"] is None
