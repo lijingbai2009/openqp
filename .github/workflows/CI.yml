@@ -368,12 +368,14 @@ jobs:
             # self-locates via resolve_oqp_root(), so point the variable at the
             # package directory to opt those integration tests in rather than
             # letting them skip silently in the one job that can run them.
-            # `tail -n1`: importing oqp on the non-MPI leg prints "Failed to
-            # import mpi4py" to stdout (pyoqp/oqp/utils/mpi_utils.py), which
-            # would otherwise be captured as a garbage first line of the path.
-            # Take only the last line -- the dirname print -- so the variable
-            # is a clean path, not "Failed to import mpi4py\n<path>".
-            OPENQP_ROOT="$(python -c 'import oqp, os; print(os.path.dirname(oqp.__file__))' | tail -n1)"
+            # No output filtering: `import oqp` keeps stdout clean even without
+            # mpi4py (tests/test_mpi4py_absent_stdout.py), so a stray line here
+            # makes the path invalid and the job fail.
+            OPENQP_ROOT="$(python -c 'import oqp, os; print(os.path.dirname(oqp.__file__))')"
+            if [ ! -d "$OPENQP_ROOT" ]; then
+              echo "OPENQP_ROOT is not a directory: '$OPENQP_ROOT'" >&2
+              exit 1
+            fi
             export OPENQP_ROOT
             echo "OPENQP_ROOT=$OPENQP_ROOT"
             # `python -m pytest`, not bare `pytest`: the -m form puts the repo
