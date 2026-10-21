@@ -943,6 +943,48 @@ class SOCNAMDQMMMProductionTests(unittest.TestCase):
         finally:
             cleanup()
 
+    def test_signature_still_binds_the_multiplicity_each_run_starts_with(self):
+        """Two runs started with different [tdhf] input keep distinct signatures."""
+        namd, _logs, cleanup = load_namd_with_stubs()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                first, mol, _selected = self._soc_driver_after_s1_gradient(
+                    namd, namd.NAMD_SOC_MCH, "soc_mch", tmpdir)
+                second, other, _selected = self._soc_driver_after_s1_gradient(
+                    namd, namd.NAMD_SOC_MCH, "soc_mch", tmpdir)
+                other.config["tdhf"]["multiplicity"] = 3
+                second._signature_config_sections = (
+                    namd._signature_config_sections(other.config))
+                second._electronic_config_identity = (
+                    namd._electronic_config_identity(other.config))
+                self.assertNotEqual(
+                    first._restart_signature(), second._restart_signature())
+                # Within one run the live switch leaves the signature alone.
+                frozen = second._restart_signature()
+                namd._select_response_manifold(other, 1)
+                self.assertEqual(second._restart_signature(), frozen)
+        finally:
+            cleanup()
+
+    def test_tight_binding_identity_ignores_live_target_multiplicity(self):
+        """The TB target_multiplicity written by the manifold switch is not model input."""
+        namd, _logs, cleanup = load_namd_with_stubs()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                driver, mol, _selected = self._soc_driver_after_s1_gradient(
+                    namd, namd.NAMD_SOC_MCH, "soc_mch", tmpdir)
+                mol.config["input"]["method"] = "xtb"
+                mol.config["xtb"] = {"gfn": 2, "target_multiplicity": 1}
+                driver._signature_config_sections = (
+                    namd._signature_config_sections(mol.config))
+                # _select_response_manifold writes this key for TB methods.
+                mol.config["xtb"]["target_multiplicity"] = 3
+                method, settings = driver._effective_tight_binding_settings()
+                self.assertEqual(method, "xtb")
+                self.assertEqual(settings["target_multiplicity"], 1)
+        finally:
+            cleanup()
+
     @staticmethod
     def _soc_driver_after_s1_gradient(namd, cls, representation, tmpdir):
         """SOC driver with ns = nt = 1 whose live manifold is the singlet."""
