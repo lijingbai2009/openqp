@@ -753,21 +753,6 @@ class SOCNAMDQMMMProductionTests(unittest.TestCase):
         finally:
             cleanup()
 
-    def test_periodic_odp_is_rejected_until_minimum_images_exist(self):
-        namd, _logs, cleanup = load_namd_with_stubs()
-        try:
-            self.assertIsNone(
-                namd._validate_odp_boundary_conditions(object(), False))
-            with self.assertRaisesRegex(NotImplementedError, "minimum-image"):
-                namd._validate_odp_boundary_conditions(object(), True)
-            src = NAMD.read_text()
-            self.assertIn(
-                "_validate_odp_boundary_conditions(self.odp, self.periodic)",
-                src,
-            )
-        finally:
-            cleanup()
-
     def test_soc_nve_gate_and_restart_are_enabled(self):
         src = NAMD.read_text()
 

@@ -260,7 +260,7 @@ SECTION_NAMES = {
     "input", "d4", "mp2", "cc", "guess", "pcm", "dftb", "symmetry", "scf",
     "dftgrid", "tdhf", "ekt", "properties", "optimize", "geometric",
     "oqp", "neb", "hess", "nac", "md", "odp", "qmmm", "droplet",
-    "solute_com", "json", "tests",
+    "solute_com", "flexible", "json", "tests",
     # Native multiconfigurational wavefunction stack.
     "cas", "casscf", "ci", "fci", "pt2", "state_average",
 }
@@ -292,6 +292,10 @@ GENERIC_SCHEMA_KEYS = {
         max_penetration
     """),
     "solute_com": _keys("enabled center force_constant atoms"),
+    "flexible": _keys("""
+        enabled alpha temperature center atoms point anchor resnames
+        threshold scale max_iterations keep_below_threshold
+    """),
     "input": _keys("library perf ispher d4 qmmm_flag soc_2e omp_threads verbose"),
     "d4": _keys("s6 s8 s9 a1 a2 alp"),
     "mp2": _keys("variant transform same_spin_scale opposite_spin_scale"),
@@ -2051,7 +2055,7 @@ def _validate_semantics(spec: CalculationSpec) -> None:
     odp_section = next(
         (call for call in spec.modifiers if call.name == "odp"), None
     )
-    for independent_control in ("droplet", "solute_com"):
+    for independent_control in ("droplet", "solute_com", "flexible"):
         control = next(
             (call for call in spec.modifiers if call.name == independent_control),
             None,
@@ -2098,14 +2102,7 @@ def _validate_semantics(spec: CalculationSpec) -> None:
         if (driver.name != "namd"
                 and requested(odp_section.kwargs.get("enabled", False))):
             raise OQPInputError(
-                "odp(...) currently requires the NVE namd(...) workflow"
-            )
-        if (driver.name == "namd"
-                and requested(odp_section.kwargs.get("enabled", False))
-                and str(options.get("ensemble", "nve")).strip().lower()
-                != "nve"):
-            raise OQPInputError(
-                "odp(...) currently requires ensemble=nve in namd(...)"
+                "odp(...) currently requires the namd(...) workflow"
             )
     if states and set(_driver_options(driver)).intersection({"active", "init_state"}):
         key = sorted(set(_driver_options(driver)).intersection({"active", "init_state"}))[0]

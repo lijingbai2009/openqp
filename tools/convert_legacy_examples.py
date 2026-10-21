@@ -585,6 +585,7 @@ def _driver_and_sections(
         "mp2", "guess", "pcm", "dftb", "symmetry", "scf", "dftgrid",
         "tdhf", "properties", "qmmm", "json", "tests",
         "cas", "casscf", "ci", "fci", "pt2", "state_average",
+        "odp", "droplet", "solute_com", "flexible",
     )
     for section in generic_sections:
         values = consumer.take(section)
