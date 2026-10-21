@@ -145,6 +145,11 @@ class Molecule:
             'OQP::namd_tdc', 'OQP::namd_eabs', 'OQP::namd_stas', 'OQP::namd_dcv',
             'OQP::td_singlet_energies', 'OQP::td_triplet_energies',
             'OQP::td_bvec_mo_s', 'OQP::td_bvec_mo_t',
+            # Per-ladder state-tracking record of a two-ladder run (written by
+            # NACME.align_x for the ladder it aligned, read back through
+            # NACME.load_state_history at the next step).
+            'OQP::state_tracking_lineage_s', 'OQP::state_tracking_lineage_t',
+            'OQP::state_tracking_phase_initial_s', 'OQP::state_tracking_phase_initial_t',
             'OQP::mo_tracking_order', 'OQP::mo_tracking_phase',
             'OQP::mo_tracking_overlap', 'OQP::mo_tracking_margin',
             'OQP::state_tracking_order', 'OQP::state_tracking_lineage',
