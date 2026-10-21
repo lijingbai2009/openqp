@@ -305,6 +305,32 @@ def mm_hamiltonian_identity(forcefield_files, options):
             "options": {k: options[k] for k in sorted(options)}}
 
 
+def _file_digest(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def qm_surface_identity(config, input_file=None):
+    """Every QM option that changes the energy surface, as NAMD records it
+    (input method/basis/library/ispher/..., scf, dftgrid, pcm, ...), with
+    ``file:`` basis definitions replaced by the SHA-256 of their contents."""
+    from oqp.library.namd import _electronic_config_identity
+
+    identity = _electronic_config_identity(config)
+    directory = os.path.dirname(input_file) if input_file else ""
+    for section, key in (("input", "basis"), ("scf", "init_basis")):
+        value = identity.get(section, {}).get(key)
+        if isinstance(value, str) and value.startswith("file:"):
+            path = os.path.join(directory, value[len("file:"):])
+            identity[section][key] = {
+                "file": os.path.basename(path),
+                "sha256": _file_digest(path) if os.path.isfile(path) else None}
+    return identity
+
+
 def topology_identity(topology, qm_atoms, electronic):
     """Hash of what makes windows comparable: atoms, bonds, QM region, model."""
     digest = hashlib.sha256()

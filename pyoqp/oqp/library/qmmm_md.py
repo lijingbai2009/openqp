@@ -2,6 +2,7 @@ import openmm.app as app
 import openmm as mm
 import openmm.unit as unit
 import numpy as np
+import hashlib
 import json
 import os
 import time
@@ -12,7 +13,8 @@ from oqp.library.qmmm_active import (
     selection_requested)
 from oqp.library.qmmm_driver import OpenQpQMMM, read_xyz, is_periodic_method
 from oqp.library.qmmm_md_bias import (
-    QMMMMDBias, SERIES_FORMAT, mm_hamiltonian_identity, requested_sections,
+    QMMMMDBias, SERIES_FORMAT, mm_hamiltonian_identity, qm_surface_identity,
+    requested_sections,
     require_orthorhombic, topology_identity,
 )
 from oqp.utils.md_controls import (
@@ -679,6 +681,9 @@ class QMMM_MD:
         self._unbiased_kJ = None
         self.oqp_cfg = qm_cfg
         self.mol     = mol
+        # the QM settings as given, before any evaluation can update them:
+        # the window identity and the restart check must see the same values
+        self._qm_config_given = deepcopy(self._qm_config())
 
         # ------ internal state --------------------------------------------
         self.oqp_driver = None
@@ -1596,17 +1601,32 @@ class QMMM_MD:
                 **extra,
             )
 
+    def _qm_config(self):
+        """The sectioned QM configuration: the molecule's, or the flat
+        ``section.key`` mapping this driver was given."""
+        if self.mol is not None and self.mol.config:
+            return self.mol.config
+        cfg = {}
+        for key, value in (self.oqp_cfg or {}).items():
+            section, _, name = str(key).partition(".")
+            if name:
+                cfg.setdefault(section, {})[name] = value
+        return cfg
+
     def _bias_metadata(self):
         """Provenance read back by oqp.library.odp.odp_wham."""
-        cfg = self.mol.config if self.mol is not None else {}
-        inp = cfg.get("input", {}) if cfg else {}
-        if not inp and self.oqp_cfg:
-            inp = {str(k).split(".", 1)[1]: v for k, v in self.oqp_cfg.items()
-                   if str(k).startswith("input.") and "." in str(k)}
-        scf = cfg.get("scf", {}) if cfg else {}
-        if not scf and self.oqp_cfg:
-            scf = {str(k).split(".", 1)[1]: v for k, v in self.oqp_cfg.items()
-                   if str(k).startswith("scf.") and "." in str(k)}
+        cfg = self._qm_config_given
+        inp = cfg.get("input", {})
+        scf = cfg.get("scf", {})
+        cell = None
+        if is_periodic_method(self.cutoff):
+            cell = [[float(v.value_in_unit(unit.nanometer)) for v in vector]
+                    for vector in self.pdb.topology.getPeriodicBoxVectors()]
+        constraints = hashlib.sha256()
+        for k in range(self.system_md.getNumConstraints()):
+            i, j, dist = self.system_md.getConstraintParameters(k)
+            constraints.update(("%d-%d:%.12g;" % (
+                i, j, dist.value_in_unit(unit.nanometer))).encode())
         electronic = {
             "method": str(inp.get("method", "")).lower(),
             "functional": str(inp.get("functional", "")).lower(),
@@ -1624,6 +1644,18 @@ class QMMM_MD:
                     "h_lj": self.h_lj,
                     "mm_charge_width": self.mm_charge_width,
                 }),
+            # every QM option that changes the surface, with file-backed
+            # basis definitions addressed by content
+            "qm_surface": qm_surface_identity(
+                cfg, getattr(self.mol, "input_file", None)),
+            # the sampled degrees of freedom: held atoms and constraints
+            "propagation": {
+                "rigidwater": bool(self.rigidwater),
+                "frozen_atoms": sorted(int(i) for i in self.frozen_atoms),
+                "constraints_sha256": constraints.hexdigest(),
+            },
+            # the periodic cell of the input (part of the PME Hamiltonian)
+            "cell_nm": cell,
         }
         return {
             "format": SERIES_FORMAT,

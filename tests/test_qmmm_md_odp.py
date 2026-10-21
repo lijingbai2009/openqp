@@ -356,6 +356,7 @@ print("PME=" + json.dumps({
     "unbiased": [float(v) for v in data["E_unbiased"]],
     "split": float(np.max(np.abs(split))),
     "box": box.tolist(),
+    "identity": series["system_identity"]["electronic"],
     "xyz": xyz[[8, 16, 244]].tolist(),
 }))
 """
@@ -406,6 +407,15 @@ def test_periodic_qmmm_md_odp_uses_the_minimum_image(tmp_path):
     plain, moved = results["ala_box.pdb"], results["ala_shifted.pdb"]
     # the propagated potential is the QM/MM energy plus the bias terms
     assert plain["split"] < 1.0e-6 and moved["split"] < 1.0e-6
+    # the window identity carries the cell, the sampled degrees of freedom
+    # and the QM surface settings
+    identity = plain["identity"]
+    assert np.allclose(identity["cell_nm"], np.diag([1.6, 1.6, 1.6]))
+    assert identity["propagation"]["rigidwater"] is True
+    assert identity["propagation"]["frozen_atoms"] == []
+    assert len(identity["propagation"]["constraints_sha256"]) == 64
+    assert identity["qm_surface"]["input"]["basis"] == "sto-3g"
+    assert "dftgrid" in identity["qm_surface"]
     # step 0: the CVs are the minimum-image distances of the input geometry
     box = np.array(moved["box"])
     xyz = np.array(moved["xyz"])
@@ -425,3 +435,29 @@ def test_periodic_qmmm_md_odp_uses_the_minimum_image(tmp_path):
     assert abs(moved["xi"][0] - plain["xi"][0]) < 1.0e-6
     assert abs(moved["bias"][0] - plain["bias"][0]) < 1.0e-8
     assert abs(moved["unbiased"][0] - plain["unbiased"][0]) < 1.0e-3
+
+
+def test_qm_surface_identity_binds_every_surface_option(tmp_path):
+    from oqp.library.qmmm_md_bias import qm_surface_identity
+
+    base_cfg = {"input": {"method": "hf", "basis": "sto-3g", "library": "",
+                          "ispher": "-1", "charge": "0"},
+                "scf": {"type": "rhf", "conv": "1e-6"},
+                "dftgrid": {"rad_npts": "96"}}
+    base = qm_surface_identity(base_cfg)
+    assert qm_surface_identity(base_cfg) == base
+    for section, key, value in (("input", "ispher", "1"),
+                                ("input", "library", "my-basis.json"),
+                                ("scf", "conv", "1e-8"),
+                                ("dftgrid", "rad_npts", "128")):
+        changed = {k: dict(v) for k, v in base_cfg.items()}
+        changed[section][key] = value
+        assert qm_surface_identity(changed) != base, (section, key)
+    # a file-backed basis is addressed by its contents, not its name
+    (tmp_path / "custom.basis").write_text("H 0\nS 1 1.0\n 1.0 1.0\n")
+    cfg = {k: dict(v) for k, v in base_cfg.items()}
+    cfg["input"]["basis"] = "file:custom.basis"
+    first = qm_surface_identity(cfg, str(tmp_path / "window.oqp"))
+    assert len(first["input"]["basis"]["sha256"]) == 64
+    (tmp_path / "custom.basis").write_text("H 0\nS 1 1.0\n 2.0 1.0\n")
+    assert qm_surface_identity(cfg, str(tmp_path / "window.oqp")) != first
