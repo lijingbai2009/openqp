@@ -7,6 +7,7 @@ SOC-QMMM production path.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import re
@@ -134,6 +135,21 @@ def _source_copy(name, relative_path):
     return module
 
 
+def _module_level_oqp_imports(path):
+    """``oqp.*`` modules a source file imports when it is executed.
+
+    Only module-level statements count; imports inside functions run lazily
+    and are the caller's business.
+    """
+    names = set()
+    for node in ast.parse(path.read_text()).body:
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module)
+        elif isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+    return {name for name in names if name == "oqp" or name.startswith("oqp.")}
+
+
 def load_namd_with_stubs():
     """Import namd.py without the compiled extension for state-map tests."""
     logs = []
@@ -188,6 +204,9 @@ def load_namd_with_stubs():
                                            "periodic_table/__init__.py"),
         "oqp.utils.constants": _source_copy("oqp.utils.constants", "utils/constants.py"),
         "oqp.utils.qmmm": _source_copy("oqp.utils.qmmm", "utils/qmmm.py"),
+        # FlexiBLE boundary (#531): pure Python (math, numpy).
+        "oqp.library.flexible_boundary": _source_copy(
+            "oqp.library.flexible_boundary", "library/flexible_boundary.py"),
         "oqp.molecule": molecule,
         "oqp.library.nac_utils": nac_utils,
         "oqp.library.odp": odp,
@@ -196,6 +215,15 @@ def load_namd_with_stubs():
         "oqp.utils.file_utils": file_utils,
         "oqp.utils.tb_backends": tb_backends,
     }
+    # The stub packages have an empty __path__, so a module namd.py imports
+    # at load time that is missing here resolves only if an earlier test left
+    # the real one in sys.modules: the file then fails when run alone but
+    # passes in the full suite.  Require every such import to be provided.
+    missing = sorted(_module_level_oqp_imports(NAMD) - set(modules))
+    if missing:
+        raise AssertionError(
+            "load_namd_with_stubs provides no module for namd.py import(s) "
+            + ", ".join(missing))
     cleanup = isolate_modules()
     sys.modules.update(modules)
     sys.modules["oqp.molecule.oqpdata"] = _source_copy("oqp.molecule.oqpdata",
