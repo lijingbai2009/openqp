@@ -531,3 +531,21 @@ def test_window_identity_binds_espf_controls_and_tb_backend_contents(
     assert qm_surface_identity(other) == qm_surface_identity(config)
     assert tight_binding_identity(types.SimpleNamespace(
         config={"input": {"method": "hf"}})) is None
+
+
+def test_periodic_solute_com_requires_a_whole_solute():
+    pytest.importorskip("openmm")
+    from openmm import app, unit
+    from oqp.library.qmmm_md_bias import require_whole_group
+
+    pdb = app.PDBFile(str(EXAMPLES / "ala_box.pdb"))
+    xyz = np.array(pdb.positions.value_in_unit(unit.nanometer))
+    box = np.array([1.6, 1.6, 1.6])
+    require_whole_group(pdb.topology, xyz, box, "0-18", "[solute_com]")
+    split = xyz.copy()
+    split[0] += np.array([1.6, 0.0, 0.0])   # one dipeptide atom in the next image
+    with pytest.raises(ValueError, match="bonded across the periodic cell"):
+        require_whole_group(pdb.topology, split, box, "0-18", "[solute_com]")
+    # atoms outside the restrained group do not matter
+    require_whole_group(pdb.topology, split, box, "244-246", "[solute_com]")
+

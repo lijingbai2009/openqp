@@ -280,6 +280,26 @@ def require_orthorhombic(cell, names):
             "has off-diagonal lattice components" % ", ".join(names))
 
 
+def require_whole_group(topology, positions, box, atoms, label):
+    """Refuse a group whose bonds cross the cell as given: a bond longer
+    than half a box length along an axis means the group starts split
+    between periodic images."""
+    natom = int(topology.getNumAtoms())
+    if isinstance(atoms, str):
+        selected = set(_index_list(atoms, natom, label))
+    else:
+        selected = {int(i) for i in atoms}
+    positions = np.asarray(positions, dtype=np.float64)
+    box = np.asarray(box, dtype=np.float64).reshape(3)
+    for bond in topology.bonds():
+        i, j = int(bond[0].index), int(bond[1].index)
+        if i in selected and j in selected and np.any(
+                np.abs(positions[i] - positions[j]) > 0.5*box):
+            raise ValueError(
+                f"{label} atoms {i} and {j} are bonded across the periodic "
+                "cell in the input geometry; write the solute whole")
+
+
 def _forcefield_path(name):
     """The file OpenMM's ForceField loads for this name: a path, or a file
     shipped in OpenMM's data directories."""

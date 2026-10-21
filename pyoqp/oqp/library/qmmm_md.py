@@ -15,7 +15,8 @@ from oqp.library.qmmm_driver import OpenQpQMMM, read_xyz, is_periodic_method
 from oqp.library.qmmm_md_bias import (
     QMMMMDBias, SERIES_FORMAT, espf_environment_identity,
     mm_hamiltonian_identity, qm_surface_identity, requested_sections,
-    require_orthorhombic, tight_binding_identity, topology_identity,
+    require_orthorhombic, require_whole_group, tight_binding_identity,
+    topology_identity,
 )
 from oqp.utils.md_controls import (
     continuation_seed,
@@ -875,6 +876,16 @@ class QMMM_MD:
                 require_orthorhombic(
                     [[v.value_in_unit(unit.nanometer) for v in vec]
                      for vec in vectors], self._bias_requested)
+                if "solute_com" in self._bias_requested:
+                    # the restraint acts on the unwrapped OpenMM positions,
+                    # which stay continuous only if the solute starts whole
+                    require_whole_group(
+                        self.pdb.topology,
+                        np.asarray(self.pdb.positions.value_in_unit(
+                            unit.nanometer)),
+                        self._box_lengths_nm(),
+                        self._bias_sections.get("solute_com", {}).get("atoms")
+                        or self.qm_atoms, "[solute_com]")
             sys0 = self.mm_systems["sys0"]
             masses = np.array([
                 sys0.getParticleMass(i).value_in_unit(unit.dalton)
