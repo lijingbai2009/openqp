@@ -15,7 +15,8 @@ from oqp.library.qmmm_driver import OpenQpQMMM, read_xyz, is_periodic_method
 from oqp.library.qmmm_md_bias import (
     QMMMMDBias, SERIES_FORMAT, espf_environment_identity,
     mm_hamiltonian_identity, qm_surface_identity, requested_sections,
-    require_orthorhombic, require_whole_group, tight_binding_identity,
+    frozen_coordinates_digest, require_orthorhombic, require_whole_group,
+    tight_binding_identity,
     topology_identity,
 )
 from oqp.utils.md_controls import (
@@ -1682,6 +1683,13 @@ class QMMM_MD:
             "propagation": {
                 "rigidwater": bool(self.rigidwater),
                 "frozen_atoms": sorted(int(i) for i in self.frozen_atoms),
+                # frozen atoms never move, so their positions are parameters
+                # of the potential (rounded to 1e-5 nm, far below any physical
+                # difference, so a restart from single-precision positions
+                # matches)
+                "frozen_coordinates_sha256": frozen_coordinates_digest(
+                    self.pdb.positions.value_in_unit(unit.nanometer),
+                    self.frozen_atoms),
                 "constraints_sha256": constraints.hexdigest(),
             },
             # the periodic cell of the input (part of the PME Hamiltonian)

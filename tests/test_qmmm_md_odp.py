@@ -549,3 +549,21 @@ def test_periodic_solute_com_requires_a_whole_solute():
     # atoms outside the restrained group do not matter
     require_whole_group(pdb.topology, split, box, "244-246", "[solute_com]")
 
+
+
+def test_frozen_atom_positions_are_part_of_the_identity():
+    from oqp.library.qmmm_md_bias import frozen_coordinates_digest
+
+    xyz = np.array([[0.1, 0.2, 0.3], [1.0, 1.1, 1.2], [2.0, 2.1, 2.2]])
+    base = frozen_coordinates_digest(xyz, [2, 0])
+    assert frozen_coordinates_digest(xyz, [0, 2]) == base
+    # single-precision round trip of a restart keeps the identity
+    assert frozen_coordinates_digest(xyz.astype(np.float32), [0, 2]) == base
+    # a frozen atom held elsewhere is another potential
+    moved = xyz.copy()
+    moved[2, 0] += 0.01
+    assert frozen_coordinates_digest(moved, [0, 2]) != base
+    # a mobile atom's starting position is an initial condition, not part of it
+    moved = xyz.copy()
+    moved[1, 0] += 0.5
+    assert frozen_coordinates_digest(moved, [0, 2]) == base

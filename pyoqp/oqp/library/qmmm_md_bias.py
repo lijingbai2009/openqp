@@ -280,6 +280,16 @@ def require_orthorhombic(cell, names):
             "has off-diagonal lattice components" % ", ".join(names))
 
 
+def frozen_coordinates_digest(positions_nm, frozen_atoms):
+    """SHA-256 of the frozen atoms' positions rounded to 1e-5 nm."""
+    digest = hashlib.sha256()
+    xyz = np.asarray(positions_nm, dtype=np.float64)
+    for atom in sorted(int(i) for i in frozen_atoms):
+        x, y, z = xyz[atom]
+        digest.update(f"{atom}:{x:.5f},{y:.5f},{z:.5f};".encode())
+    return digest.hexdigest()
+
+
 def require_whole_group(topology, positions, box, atoms, label):
     """Refuse a group whose bonds cross the cell as given: a bond longer
     than half a box length along an axis means the group starts split
