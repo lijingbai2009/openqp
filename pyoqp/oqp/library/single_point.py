@@ -1765,9 +1765,15 @@ class Gradient(Calculator):
     def _sc_nevpt2_grad_or_none(self):
         """The analytic SC-NEVPT2 gradient, or None if that route declines.
 
-        SC-NEVPT2 is `method=caspt2` with `[pt2] h0=dyall` and
-        `contraction=strong`; every other PT2 spelling belongs to the CASPT2
-        route, so this returns None immediately for them rather than probing.
+        SC-NEVPT2 is whatever resolves to `[pt2] h0=dyall` with
+        `contraction=strong`: `method=sc-nevpt2` (or `scnevpt2`) with the
+        controls unset, or the older `method=caspt2` spelling with both set.
+        sc_nevpt2_gradient_route() decides that ownership from the resolved
+        options -- as the fused energy pass does -- and answers OTHER_ROUTE for
+        every other PT2 calculation.  Gating on the method label here instead
+        sent a named `sc-nevpt2` run to the CASPT2 derivative, which refuses
+        strong contraction: `gradient=analytic` failed and `auto` discarded the
+        energy pass's analytic gradient for central differences.
 
         Returning None -- not falling back here -- is what keeps ONE
         central-difference fallback in the code: caspt2_grad() already owns it,
@@ -1778,9 +1784,6 @@ class Gradient(Calculator):
 
         The import stays local to avoid a circular module dependency.
         """
-        if self.method != 'caspt2':
-            return None
-
         from oqp.library.caspt2_dyall import _caspt2_options
         from oqp.library.nevpt2_gradient import (
             OTHER_ROUTE,
