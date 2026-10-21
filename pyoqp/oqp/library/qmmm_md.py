@@ -2,6 +2,8 @@ import openmm.app as app
 import openmm as mm
 import openmm.unit as unit
 import numpy as np
+import hashlib
+import json
 import os
 import time
 from copy import deepcopy
@@ -10,6 +12,13 @@ from oqp.library.qmmm_active import (
     freeze_constrained_partners, held_atoms, resolve_active_set,
     selection_requested)
 from oqp.library.qmmm_driver import OpenQpQMMM, read_xyz, is_periodic_method
+from oqp.library.qmmm_md_bias import (
+    QMMMMDBias, SERIES_FORMAT, espf_environment_identity,
+    mm_hamiltonian_identity, qm_surface_identity, requested_sections,
+    frozen_coordinates_digest, require_orthorhombic, require_whole_group,
+    tight_binding_identity,
+    topology_identity,
+)
 from oqp.utils.md_controls import (
     continuation_seed,
     explicit_md_control_keys,
@@ -57,6 +66,11 @@ def _rigid_water_constraints(forcefield, topology, qm_atoms):
             continue
         out.append((p1, p2, dist))
     return out
+
+
+HARTREE_TO_KJMOL = 2625.499639
+NM_TO_BOHR = 1.0/0.052917721090
+HABOHR_TO_KJMOLNM = HARTREE_TO_KJMOL*NM_TO_BOHR
 
 
 def _to_kJmol(energy):
@@ -494,6 +508,7 @@ class QMMM_MD:
                 "'qmmm.forcefield_files' is required in the configuration."
             )
         self.forcefield = app.ForceField(*ff_files)
+        self._forcefield_files = list(ff_files)
 
         qm_atoms_raw = qmmm_cfg.get("qm_atoms")
         if qm_atoms_raw is None:
@@ -647,8 +662,42 @@ class QMMM_MD:
             elif all(str(qm_cfg[k]).strip() == '1' for k in _vkeys):
                 for k in _vkeys:
                     qm_cfg[k] = '0'
+        # odp(...), droplet(...) and solute_com(...) act on the nuclei; they
+        # are not settings of the QM single point evaluated at each step.
+        bias_names = ("odp", "droplet", "solute_com")
+        if mol is not None:
+            self._bias_sections = {
+                name: dict(mol.config.get(name, {})) for name in bias_names}
+        else:
+            self._bias_sections = {name: {} for name in bias_names}
+            for key in list(qm_cfg or {}):
+                head, _, tail = str(key).partition(".")
+                if head.strip().lower() in bias_names and tail:
+                    self._bias_sections[head.strip().lower()][tail] = qm_cfg.pop(key)
+        self._bias_requested = requested_sections(self._bias_sections)
+        if self._bias_requested and self.ensemble != "nvt":
+            print("[QM/MM MD] %s with ensemble=nve: WHAM will treat these "
+                  "windows as non-canonical" % ", ".join(self._bias_requested))
+        self.bias = None
+        self._bias_record = None
+        self._unbiased_kJ = None
         self.oqp_cfg = qm_cfg
         self.mol     = mol
+        # the QM settings as given, before any evaluation can update them:
+        # the window identity and the restart check must see the same values
+        self._qm_config_given = deepcopy(self._qm_config())
+        self._espf_identity = None
+        self._tight_binding_identity = None
+        if self._bias_requested:
+            self._espf_identity = espf_environment_identity()
+            method = str(self._qm_config_given.get("input", {}).get(
+                "method", "")).lower()
+            if method in ("dftb", "xtb") and mol is None:
+                raise ValueError(
+                    "QM/MM MD with %s needs the molecule to resolve its "
+                    "backend artifacts for the window identity" % method)
+            if mol is not None:
+                self._tight_binding_identity = tight_binding_identity(mol)
 
         # ------ internal state --------------------------------------------
         self.oqp_driver = None
@@ -666,6 +715,17 @@ class QMMM_MD:
             "temperature": [],
             "volume_nm3":  [],
         }
+        if self._bias_requested:
+            self._traj_data.update({
+                "E_unbiased": [], "e_unbiased_pot_hartree": [],
+                "droplet_energy_hartree": [], "solute_com_energy_hartree": [],
+            })
+        if "odp" in self._bias_requested:
+            self._traj_data.update({key: [] for key in (
+                "odp_window", "odp_xi", "odp_cv_raw", "odp_cv_scaled",
+                "odp_cv_perpendicular", "odp_perpendicular_norm",
+                "odp_bias_parallel_hartree", "odp_bias_perpendicular_hartree",
+                "odp_bias_hartree")})
 
     # ------------------------------------------------------------------
     #  Ensemble label
@@ -811,6 +871,29 @@ class QMMM_MD:
         # helper below enables reuse only after that evaluation succeeds.
         self.oqp_driver._reuse_orbitals = False
         self.mm_systems = self.oqp_driver.mm_systems
+        if self._bias_requested:
+            if is_periodic_method(self.cutoff):
+                vectors = self.pdb.topology.getPeriodicBoxVectors()
+                require_orthorhombic(
+                    [[v.value_in_unit(unit.nanometer) for v in vec]
+                     for vec in vectors], self._bias_requested)
+                if "solute_com" in self._bias_requested:
+                    # the restraint acts on the unwrapped OpenMM positions,
+                    # which stay continuous only if the solute starts whole
+                    require_whole_group(
+                        self.pdb.topology,
+                        np.asarray(self.pdb.positions.value_in_unit(
+                            unit.nanometer)),
+                        self._box_lengths_nm(),
+                        self._bias_sections.get("solute_com", {}).get("atoms")
+                        or self.qm_atoms, "[solute_com]")
+            sys0 = self.mm_systems["sys0"]
+            masses = np.array([
+                sys0.getParticleMass(i).value_in_unit(unit.dalton)
+                for i in range(sys0.getNumParticles())])
+            self.bias = QMMMMDBias(
+                self._bias_sections, self.pdb.topology, self.qm_atoms, masses,
+                is_periodic_method(self.cutoff))
 
     def _compute_qmmm_force(self, positions):
         """Evaluate one force and enable orbital reuse only after success."""
@@ -824,7 +907,25 @@ class QMMM_MD:
             self.oqp_driver._reuse_orbitals = False
             raise
         self.oqp_driver._reuse_orbitals = self.mo_reuse
-        return result
+        if self.bias is None:
+            return result
+        return self._add_bias(positions, *result)
+
+    def _add_bias(self, positions, energy, forces):
+        """Add the ODP umbrella and restraints (atomic units inside)."""
+        xyz_nm = np.asarray(positions.value_in_unit(unit.nanometer), dtype=float)
+        box = (self._box_lengths_nm()*NM_TO_BOHR
+               if is_periodic_method(self.cutoff) else None)
+        e_bias, f_bias, record = self.bias.evaluate(xyz_nm*NM_TO_BOHR, box)
+        unbiased_kJ = _to_kJmol(energy)
+        self._unbiased_kJ = unbiased_kJ
+        self._bias_record = record
+        added = f_bias*HABOHR_TO_KJMOLNM                     # kJ/mol/nm
+        if unit.is_quantity(forces):
+            forces = forces + added*(unit.kilojoule_per_mole/unit.nanometer)
+        else:
+            forces = np.asarray(forces, dtype=float) + added
+        return unbiased_kJ + e_bias*HARTREE_TO_KJMOL, forces
 
     def _resolve_frozen_atoms(self):
         """The atoms OpenMM holds fixed for this run, from the ``[qmmm]``
@@ -1040,6 +1141,12 @@ class QMMM_MD:
             step0 = int(start["step"])
             self.simulation_md.currentStep = step0
             context.setTime(float(start["time_ps"]) * unit.picoseconds)
+            # before any output is truncated to the checkpoint: a refused
+            # continuation must leave the trajectory, table and log intact
+            energy_npz = self._energy_npz_path()
+            if os.path.isfile(energy_npz):
+                with np.load(energy_npz) as data:
+                    self._check_resumed_bias(data, energy_npz)
 
         resumed = (self.restart and os.path.isfile(self.trajectory_file)
                    and self._resume_trajectory(step0))
@@ -1197,6 +1304,45 @@ class QMMM_MD:
                     unit.nanometer))
             self._sampled_step, self._sampled_xyz = step0, xyz
             self._force_xyz = xyz
+
+    def _bias_contract(self, metadata):
+        """The parts of the bias provenance that rows of one table share:
+        the sampled Hamiltonian, the bias and restraints, the ensemble and
+        its temperature (time step and friction may change on a restart)."""
+        return {
+            "format": metadata.get("format"),
+            "ensemble": metadata.get("ensemble"),
+            "temperature_kelvin": (metadata.get("thermostat") or {}).get(
+                "temperature_kelvin"),
+            "controls": metadata.get("controls"),
+            "system_identity": metadata.get("system_identity"),
+        }
+
+    def _check_resumed_bias(self, data, path):
+        """Refuse to continue a table whose earlier rows were sampled with a
+        different bias, restraint or Hamiltonian than this run."""
+        stored = None
+        if "bias_metadata_json" in data.files:
+            stored = json.loads(str(np.asarray(data["bias_metadata_json"])[0]))
+        if self.bias is None:
+            if stored is not None:
+                raise ValueError(
+                    "restart: %s was sampled with ODP/restraints, but this run "
+                    "requests none; start a new table" % path)
+            return
+        if stored is None:
+            raise ValueError(
+                "restart: %s has no bias provenance, but this run requests "
+                "%s; start a new table" % (path, ", ".join(self._bias_requested)))
+        old = self._bias_contract(stored)
+        new = json.loads(json.dumps(self._bias_contract(self._bias_metadata()),
+                                    sort_keys=True))
+        changed = sorted(k for k in new if old.get(k) != new[k])
+        if changed:
+            raise ValueError(
+                "restart: the bias provenance of %s differs from this run in %s; "
+                "a table must hold samples of one Hamiltonian and bias, so "
+                "start a new window instead" % (path, ", ".join(changed)))
 
     # ------------------------------------------------------------------
     #  Checkpoints and snapshots
@@ -1402,6 +1548,21 @@ class QMMM_MD:
         self._traj_data["E_tot"].append(E_tot)
         self._traj_data["temperature"].append(T_inst)
         self._traj_data["volume_nm3"].append(vol)
+        if self.bias is not None:
+            record = self._bias_record
+            self._traj_data["E_unbiased"].append(self._unbiased_kJ)
+            self._traj_data["e_unbiased_pot_hartree"].append(
+                self._unbiased_kJ/HARTREE_TO_KJMOL)
+            self._traj_data["droplet_energy_hartree"].append(
+                record["droplet_energy_hartree"])
+            self._traj_data["solute_com_energy_hartree"].append(
+                record["solute_com_energy_hartree"])
+            if self.bias.odp is not None:
+                for key in ("odp_window", "odp_xi", "odp_cv_raw", "odp_cv_scaled",
+                            "odp_cv_perpendicular", "odp_perpendicular_norm",
+                            "odp_bias_parallel_hartree",
+                            "odp_bias_perpendicular_hartree", "odp_bias_hartree"):
+                    self._traj_data[key].append(np.array(record[key], copy=True))
         self._report_energies(step_idx, t_ps, E_pot, E_kin, E_tot, T_inst, vol)
         self._sampled_step, self._sampled_xyz = step_idx, xyz_now
         self._write_periodic_snapshots(step_idx)
@@ -1453,11 +1614,102 @@ class QMMM_MD:
         # Written through an open handle: given a name, np.savez appends
         # ".npz" by its own (case-sensitive) rule, and "energies.NPZ" would
         # land in "energies.NPZ.npz" -- a file a restart never looks for.
+        extra = {}
+        if self.bias is not None:
+            extra["bias_metadata_json"] = np.array([json.dumps(
+                self._bias_metadata(), sort_keys=True)])
         with open(self._energy_npz_path(), "wb") as stream:
             np.savez(
                 stream,
                 **{k: np.asarray(v) for k, v in self._traj_data.items()},
+                **extra,
             )
+
+    def _qm_config(self):
+        """The sectioned QM configuration: the molecule's, or the flat
+        ``section.key`` mapping this driver was given."""
+        if self.mol is not None and self.mol.config:
+            return self.mol.config
+        cfg = {}
+        for key, value in (self.oqp_cfg or {}).items():
+            section, _, name = str(key).partition(".")
+            if name:
+                cfg.setdefault(section, {})[name] = value
+        return cfg
+
+    def _bias_metadata(self):
+        """Provenance read back by oqp.library.odp.odp_wham."""
+        cfg = self._qm_config_given
+        inp = cfg.get("input", {})
+        scf = cfg.get("scf", {})
+        cell = None
+        if is_periodic_method(self.cutoff):
+            cell = [[float(v.value_in_unit(unit.nanometer)) for v in vector]
+                    for vector in self.pdb.topology.getPeriodicBoxVectors()]
+        constraints = hashlib.sha256()
+        for k in range(self.system_md.getNumConstraints()):
+            i, j, dist = self.system_md.getConstraintParameters(k)
+            constraints.update(("%d-%d:%.12g;" % (
+                i, j, dist.value_in_unit(unit.nanometer))).encode())
+        surface = qm_surface_identity(
+            cfg, getattr(self.mol, "input_file", None))
+        electronic = {
+            "method": str(inp.get("method", "")).lower(),
+            "functional": str(inp.get("functional", "")).lower(),
+            "basis": (surface["input"]["basis"]
+                      if isinstance(surface["input"]["basis"], dict)
+                      else str(inp.get("basis", "")).lower()),
+            "charge": str(inp.get("charge", "0")),
+            "scf_type": str(scf.get("type", "")).lower(),
+            "scf_multiplicity": str(scf.get("multiplicity", "1")),
+            "cutoff": str(self.cutoff),
+            "embedding": str(self.embedding),
+            "mm_hamiltonian": mm_hamiltonian_identity(
+                self._forcefield_files, {
+                    "frontier_scheme": self.frontier_scheme,
+                    "ewald_tol": self.ewald_tol,
+                    "lj_switch": self.lj_switch,
+                    "h_lj": self.h_lj,
+                    "mm_charge_width": self.mm_charge_width,
+                }),
+            # every QM option that changes the surface, with file-backed
+            # basis definitions addressed by content
+            "qm_surface": surface,
+            # ESPF environment controls and the content of DFTB/xTB backend
+            # artifacts, both fixed when the run is set up
+            "espf_environment": self._espf_identity,
+            "tight_binding": self._tight_binding_identity,
+            # the sampled degrees of freedom: held atoms and constraints
+            "propagation": {
+                "rigidwater": bool(self.rigidwater),
+                "frozen_atoms": sorted(int(i) for i in self.frozen_atoms),
+                # frozen atoms never move, so their positions are parameters
+                # of the potential (rounded to 1e-5 nm, far below any physical
+                # difference, so a restart from single-precision positions
+                # matches)
+                "frozen_coordinates_sha256": frozen_coordinates_digest(
+                    self.pdb.positions.value_in_unit(unit.nanometer),
+                    self.frozen_atoms),
+                "constraints_sha256": constraints.hexdigest(),
+            },
+            # the periodic cell of the input (part of the PME Hamiltonian)
+            "cell_nm": cell,
+        }
+        return {
+            "format": SERIES_FORMAT,
+            "ensemble": self.ensemble.upper(),
+            "thermostat": {
+                "type": "langevin" if self.ensemble == "nvt" else "off",
+                "temperature_kelvin": float(
+                    self.temperature.value_in_unit(unit.kelvin)),
+                "friction_ps_inverse": float(
+                    self.friction.value_in_unit(unit.picosecond**-1)),
+            },
+            "timestep_fs": float(self.timestep.value_in_unit(unit.femtoseconds)),
+            "controls": self.bias.settings(),
+            "system_identity": topology_identity(
+                self.pdb.topology, self.qm_atoms, electronic),
+        }
 
     # ------------------------------------------------------------------
     #  Run all steps

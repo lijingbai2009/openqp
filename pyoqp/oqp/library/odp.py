@@ -8,6 +8,7 @@ import math
 import os
 import re
 import warnings
+import zipfile
 
 import numpy as np
 
@@ -385,10 +386,119 @@ def _same_odp_coordinate(left, right):
     )
 
 
+def _check_series_records(provenance, raw, scaled, xi, perpendicular,
+                          perpendicular_norm, bias_parallel, bias_perpendicular,
+                          bias, label):
+    """Refuse per-step ODP records that the stored bias definition does not
+    reproduce (the checks of the packed NAMD trajectory reader)."""
+    scale = np.asarray(provenance["scale"], dtype=np.float64).reshape(-1)
+    reference_r = np.asarray(provenance["reference_r"], dtype=np.float64).reshape(-1)
+    reference_p = np.asarray(provenance["reference_p"], dtype=np.float64).reshape(-1)
+    center = float(provenance["center"])
+    k_parallel = float(provenance["k_parallel_hartree"])
+    k_perpendicular = float(provenance["k_perpendicular_hartree"])
+    ncv = len(provenance["cv"])
+    if not (ncv > 0 and scale.size == reference_r.size == reference_p.size == ncv
+            and raw.ndim == 2 and raw.shape[1] == ncv
+            and np.all(scale > 0.0) and k_parallel > 0.0
+            and k_perpendicular >= 0.0
+            and provenance["cv_atom_indexing"] == "1-based"
+            and provenance["projection"]
+            == "signed_scaled_dot_over_path_norm_squared"):
+        raise ValueError(f"{label} ODP provenance has an invalid CV metric")
+    direction = scale*(reference_p - reference_r)
+    length2 = float(np.dot(direction, direction))
+    if not np.isclose(float(provenance["scaled_path_length"]), np.sqrt(length2),
+                      rtol=2.0e-12, atol=2.0e-12):
+        raise ValueError(f"{label} ODP scaled path length disagrees with its metric")
+    displacement = scaled - scale*reference_r
+    expected_xi = displacement @ direction/length2
+    expected_perpendicular = displacement - expected_xi[:, None]*direction
+    checks = (
+        (scaled, raw*scale, "scaled CV"),
+        (xi, expected_xi, "signed projection"),
+        (perpendicular, expected_perpendicular, "perpendicular CV"),
+        (perpendicular_norm, np.linalg.norm(expected_perpendicular, axis=1),
+         "perpendicular norm"),
+        (bias_parallel, 0.5*k_parallel*(xi - center)**2, "parallel bias energy"),
+        (bias_perpendicular, 0.5*k_perpendicular*perpendicular_norm**2,
+         "perpendicular bias energy"),
+        (bias, 0.5*k_parallel*(xi - center)**2
+         + 0.5*k_perpendicular*perpendicular_norm**2, "bias energy"),
+    )
+    for actual, expected, what in checks:
+        if (not np.all(np.isfinite(actual))
+                or not np.allclose(actual, expected, rtol=2.0e-12, atol=2.0e-12)):
+            raise ValueError(f"{label} ODP {what} records disagree with provenance")
+
+
+def read_qmmm_md_odp_series(path):
+    """Per-window ODP series from a ground-state QM/MM MD energy table (.npz)."""
+    with np.load(os.fspath(path), allow_pickle=False) as data:
+        if "bias_metadata_json" not in data.files:
+            raise ValueError(f"{path!r} is not a QM/MM MD table with ODP records")
+        meta = json.loads(str(np.asarray(data["bias_metadata_json"])[0]))
+        arrays = {key: np.array(data[key], copy=True) for key in data.files
+                  if key != "bias_metadata_json"}
+    if meta.get("format") != "openqp-qmmm-md-odp-series-1":
+        raise ValueError(f"{path!r} has an unknown ODP series format")
+    provenance = meta["controls"]["odp"]
+    if not provenance.get("enabled", False):
+        raise ValueError(f"{path!r} does not contain an enabled ODP umbrella")
+    windows = np.asarray(arrays["odp_window"], dtype=np.int64)
+    if np.any(windows != int(provenance["window"])):
+        raise ValueError(f"{path!r} ODP window records disagree with provenance")
+    raw = np.asarray(arrays["odp_cv_raw"], dtype=np.float64)
+    xi = np.asarray(arrays["odp_xi"], dtype=np.float64)
+    perpendicular_norm = np.asarray(arrays["odp_perpendicular_norm"], dtype=np.float64)
+    _check_series_records(
+        provenance, raw, np.asarray(arrays["odp_cv_scaled"], dtype=np.float64), xi,
+        np.asarray(arrays["odp_cv_perpendicular"], dtype=np.float64),
+        perpendicular_norm,
+        np.asarray(arrays["odp_bias_parallel_hartree"], dtype=np.float64),
+        np.asarray(arrays["odp_bias_perpendicular_hartree"], dtype=np.float64),
+        np.asarray(arrays["odp_bias_hartree"], dtype=np.float64), repr(path))
+    identity = dict(meta["system_identity"])
+    identity["conservative_restraints"] = {
+        name: meta["controls"][name] for name in ("droplet", "solute_com")}
+    return {
+        "provenance": provenance,
+        "system_identity": identity,
+        "ensemble": meta.get("ensemble"),
+        "thermostat_temperature_kelvin": (
+            meta["thermostat"]["temperature_kelvin"]
+            if meta.get("ensemble") == "NVT" else None),
+        "snapshot_bytes": os.path.getsize(os.fspath(path)),
+        "step": np.asarray(arrays["step"], dtype=np.int64),
+        "time_fs": np.asarray(arrays["time_ps"], dtype=np.float64)*1000.0,
+        "window": windows,
+        "xi": xi,
+        "cv_raw": raw,
+        "cv_scaled": np.asarray(arrays["odp_cv_scaled"], dtype=np.float64),
+        "perpendicular_norm": perpendicular_norm,
+        "bias_hartree": np.asarray(arrays["odp_bias_hartree"], dtype=np.float64),
+        "unbiased_potential_hartree": np.asarray(
+            arrays["e_unbiased_pot_hartree"], dtype=np.float64),
+        "total_conservative_hartree": np.asarray(
+            arrays["E_tot"], dtype=np.float64)/2625.499639,
+    }
+
+
+def read_odp_series(path):
+    """ODP series of one window: packed NAMD trajectory or QM/MM MD table."""
+    if zipfile.is_zipfile(os.fspath(path)):
+        return read_qmmm_md_odp_series(path)
+    from oqp.library.namd import read_odp_wham_series
+    return read_odp_wham_series(path)
+
+
 def odp_wham(trajectory_paths, temperature_kelvin, bins=100, *, discard=0,
              stride=1, tolerance=1.0e-10, max_iterations=10000,
              output=None):
-    """Recover a one-dimensional unbiased ODP PMF from packed window TRJs.
+    """Recover a one-dimensional unbiased ODP PMF from window records.
+
+    Each path is a packed NAMD trajectory (``*.namd.trj``) or the energy
+    table of a ground-state QM/MM MD window (``*.npz``).
 
     The fixed-point equations use every saved sample rather than evaluating a
     window bias only at histogram-bin centres.  This preserves optional
@@ -398,8 +508,6 @@ def odp_wham(trajectory_paths, temperature_kelvin, bins=100, *, discard=0,
     are concatenated in caller-supplied order before ``discard`` and ``stride``
     are applied.
     """
-    from oqp.library.namd import read_odp_wham_series
-
     paths = [os.fspath(path) for path in trajectory_paths]
     if not paths:
         raise ValueError("ODP WHAM requires at least one packed trajectory")
@@ -449,7 +557,7 @@ def odp_wham(trajectory_paths, temperature_kelvin, bins=100, *, discard=0,
     window_definitions = {}
     window_segments = {}
     for path in paths:
-        series = read_odp_wham_series(path)
+        series = read_odp_series(path)
         ensemble = str(series.get("ensemble") or "unknown").upper()
         sampled_temperature = series.get("thermostat_temperature_kelvin")
         if ensemble == "NVT":

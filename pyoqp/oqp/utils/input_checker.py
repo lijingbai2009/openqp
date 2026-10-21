@@ -6303,16 +6303,20 @@ def _check_runtype(config: dict[str, Any], report: CheckReport,
     runtype = _as_lower(_get(config, "input", "runtype", "energy"))
     method = _as_lower(_get(config, "input", "method", "hf"))
 
+    qmmm_md = runtype == "md" and _is_true(
+        _get(config, "input", "qmmm_flag", False))
     odp_enabled = _parse_bool_like(
         _get(config, "odp", "enabled", False), "odp.enabled", report)
-    if odp_enabled is True and runtype != "namd":
+    if odp_enabled is True and runtype != "namd" and not qmmm_md:
         report.add(
             "ERROR",
             "odp.enabled",
-            "ODP umbrella sampling currently requires the NAMD workflow.",
+            "ODP umbrella sampling currently requires the NAMD workflow or "
+            "QM/MM molecular dynamics.",
             value=f"enabled=True/runtype={runtype}",
-            expected="odp.enabled=False, or input.runtype=namd",
-            action="Disable [odp] for this calculation or use runtype=namd.",
+            expected="odp.enabled=False, input.runtype=namd, or "
+                     "input.runtype=md with qmmm",
+            action="Disable [odp] or use runtype=namd or QM/MM md.",
         )
 
     if runtype not in ALL_RUNTYPES:
@@ -6340,7 +6344,8 @@ def _check_runtype(config: dict[str, Any], report: CheckReport,
 
     for section in ("droplet", "solute_com", "flexible"):
         enabled = str(_get(config, section, "enabled", False)).strip().lower()
-        if enabled in _TRUE_BOOL and runtype != "namd":
+        if enabled in _TRUE_BOOL and runtype != "namd" and not (
+                qmmm_md and section != "flexible"):
             report.add(
                 "ERROR",
                 f"{section}.enabled",
