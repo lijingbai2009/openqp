@@ -2,6 +2,7 @@ import openmm.app as app
 import openmm as mm
 import openmm.unit as unit
 import numpy as np
+import json
 import os
 import time
 from copy import deepcopy
@@ -10,6 +11,9 @@ from oqp.library.qmmm_active import (
     freeze_constrained_partners, held_atoms, resolve_active_set,
     selection_requested)
 from oqp.library.qmmm_driver import OpenQpQMMM, read_xyz, is_periodic_method
+from oqp.library.qmmm_md_bias import (
+    QMMMMDBias, SERIES_FORMAT, requested_sections, topology_identity,
+)
 from oqp.utils.md_controls import (
     continuation_seed,
     explicit_md_control_keys,
@@ -57,6 +61,11 @@ def _rigid_water_constraints(forcefield, topology, qm_atoms):
             continue
         out.append((p1, p2, dist))
     return out
+
+
+HARTREE_TO_KJMOL = 2625.499639
+NM_TO_BOHR = 1.0/0.052917721090
+HABOHR_TO_KJMOLNM = HARTREE_TO_KJMOL*NM_TO_BOHR
 
 
 def _to_kJmol(energy):
@@ -647,6 +656,25 @@ class QMMM_MD:
             elif all(str(qm_cfg[k]).strip() == '1' for k in _vkeys):
                 for k in _vkeys:
                     qm_cfg[k] = '0'
+        # odp(...), droplet(...) and solute_com(...) act on the nuclei; they
+        # are not settings of the QM single point evaluated at each step.
+        bias_names = ("odp", "droplet", "solute_com")
+        if mol is not None:
+            self._bias_sections = {
+                name: dict(mol.config.get(name, {})) for name in bias_names}
+        else:
+            self._bias_sections = {name: {} for name in bias_names}
+            for key in list(qm_cfg or {}):
+                head, _, tail = str(key).partition(".")
+                if head.strip().lower() in bias_names and tail:
+                    self._bias_sections[head.strip().lower()][tail] = qm_cfg.pop(key)
+        self._bias_requested = requested_sections(self._bias_sections)
+        if self._bias_requested and self.ensemble != "nvt":
+            print("[QM/MM MD] %s with ensemble=nve: WHAM will treat these "
+                  "windows as non-canonical" % ", ".join(self._bias_requested))
+        self.bias = None
+        self._bias_record = None
+        self._unbiased_kJ = None
         self.oqp_cfg = qm_cfg
         self.mol     = mol
 
@@ -666,6 +694,17 @@ class QMMM_MD:
             "temperature": [],
             "volume_nm3":  [],
         }
+        if self._bias_requested:
+            self._traj_data.update({
+                "E_unbiased": [], "e_unbiased_pot_hartree": [],
+                "droplet_energy_hartree": [], "solute_com_energy_hartree": [],
+            })
+        if "odp" in self._bias_requested:
+            self._traj_data.update({key: [] for key in (
+                "odp_window", "odp_xi", "odp_cv_raw", "odp_cv_scaled",
+                "odp_cv_perpendicular", "odp_perpendicular_norm",
+                "odp_bias_parallel_hartree", "odp_bias_perpendicular_hartree",
+                "odp_bias_hartree")})
 
     # ------------------------------------------------------------------
     #  Ensemble label
@@ -811,6 +850,14 @@ class QMMM_MD:
         # helper below enables reuse only after that evaluation succeeds.
         self.oqp_driver._reuse_orbitals = False
         self.mm_systems = self.oqp_driver.mm_systems
+        if self._bias_requested:
+            sys0 = self.mm_systems["sys0"]
+            masses = np.array([
+                sys0.getParticleMass(i).value_in_unit(unit.dalton)
+                for i in range(sys0.getNumParticles())])
+            self.bias = QMMMMDBias(
+                self._bias_sections, self.pdb.topology, self.qm_atoms, masses,
+                is_periodic_method(self.cutoff))
 
     def _compute_qmmm_force(self, positions):
         """Evaluate one force and enable orbital reuse only after success."""
@@ -824,7 +871,25 @@ class QMMM_MD:
             self.oqp_driver._reuse_orbitals = False
             raise
         self.oqp_driver._reuse_orbitals = self.mo_reuse
-        return result
+        if self.bias is None:
+            return result
+        return self._add_bias(positions, *result)
+
+    def _add_bias(self, positions, energy, forces):
+        """Add the ODP umbrella and restraints (atomic units inside)."""
+        xyz_nm = np.asarray(positions.value_in_unit(unit.nanometer), dtype=float)
+        box = (self._box_lengths_nm()*NM_TO_BOHR
+               if is_periodic_method(self.cutoff) else None)
+        e_bias, f_bias, record = self.bias.evaluate(xyz_nm*NM_TO_BOHR, box)
+        unbiased_kJ = _to_kJmol(energy)
+        self._unbiased_kJ = unbiased_kJ
+        self._bias_record = record
+        added = f_bias*HABOHR_TO_KJMOLNM                     # kJ/mol/nm
+        if unit.is_quantity(forces):
+            forces = forces + added*(unit.kilojoule_per_mole/unit.nanometer)
+        else:
+            forces = np.asarray(forces, dtype=float) + added
+        return unbiased_kJ + e_bias*HARTREE_TO_KJMOL, forces
 
     def _resolve_frozen_atoms(self):
         """The atoms OpenMM holds fixed for this run, from the ``[qmmm]``
@@ -1402,6 +1467,21 @@ class QMMM_MD:
         self._traj_data["E_tot"].append(E_tot)
         self._traj_data["temperature"].append(T_inst)
         self._traj_data["volume_nm3"].append(vol)
+        if self.bias is not None:
+            record = self._bias_record
+            self._traj_data["E_unbiased"].append(self._unbiased_kJ)
+            self._traj_data["e_unbiased_pot_hartree"].append(
+                self._unbiased_kJ/HARTREE_TO_KJMOL)
+            self._traj_data["droplet_energy_hartree"].append(
+                record["droplet_energy_hartree"])
+            self._traj_data["solute_com_energy_hartree"].append(
+                record["solute_com_energy_hartree"])
+            if self.bias.odp is not None:
+                for key in ("odp_window", "odp_xi", "odp_cv_raw", "odp_cv_scaled",
+                            "odp_cv_perpendicular", "odp_perpendicular_norm",
+                            "odp_bias_parallel_hartree",
+                            "odp_bias_perpendicular_hartree", "odp_bias_hartree"):
+                    self._traj_data[key].append(np.array(record[key], copy=True))
         self._report_energies(step_idx, t_ps, E_pot, E_kin, E_tot, T_inst, vol)
         self._sampled_step, self._sampled_xyz = step_idx, xyz_now
         self._write_periodic_snapshots(step_idx)
@@ -1453,11 +1533,53 @@ class QMMM_MD:
         # Written through an open handle: given a name, np.savez appends
         # ".npz" by its own (case-sensitive) rule, and "energies.NPZ" would
         # land in "energies.NPZ.npz" -- a file a restart never looks for.
+        extra = {}
+        if self.bias is not None:
+            extra["bias_metadata_json"] = np.array([json.dumps(
+                self._bias_metadata(), sort_keys=True)])
         with open(self._energy_npz_path(), "wb") as stream:
             np.savez(
                 stream,
                 **{k: np.asarray(v) for k, v in self._traj_data.items()},
+                **extra,
             )
+
+    def _bias_metadata(self):
+        """Provenance read back by oqp.library.odp.odp_wham."""
+        cfg = self.mol.config if self.mol is not None else {}
+        inp = cfg.get("input", {}) if cfg else {}
+        if not inp and self.oqp_cfg:
+            inp = {str(k).split(".", 1)[1]: v for k, v in self.oqp_cfg.items()
+                   if str(k).startswith("input.") and "." in str(k)}
+        scf = cfg.get("scf", {}) if cfg else {}
+        if not scf and self.oqp_cfg:
+            scf = {str(k).split(".", 1)[1]: v for k, v in self.oqp_cfg.items()
+                   if str(k).startswith("scf.") and "." in str(k)}
+        electronic = {
+            "method": str(inp.get("method", "")).lower(),
+            "functional": str(inp.get("functional", "")).lower(),
+            "basis": str(inp.get("basis", "")).lower(),
+            "charge": str(inp.get("charge", "0")),
+            "scf_type": str(scf.get("type", "")).lower(),
+            "scf_multiplicity": str(scf.get("multiplicity", "1")),
+            "cutoff": str(self.cutoff),
+            "embedding": str(self.embedding),
+        }
+        return {
+            "format": SERIES_FORMAT,
+            "ensemble": self.ensemble.upper(),
+            "thermostat": {
+                "type": "langevin" if self.ensemble == "nvt" else "off",
+                "temperature_kelvin": float(
+                    self.temperature.value_in_unit(unit.kelvin)),
+                "friction_ps_inverse": float(
+                    self.friction.value_in_unit(unit.picosecond**-1)),
+            },
+            "timestep_fs": float(self.timestep.value_in_unit(unit.femtoseconds)),
+            "controls": self.bias.settings(),
+            "system_identity": topology_identity(
+                self.pdb.topology, self.qm_atoms, electronic),
+        }
 
     # ------------------------------------------------------------------
     #  Run all steps

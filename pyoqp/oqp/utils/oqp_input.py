@@ -2055,16 +2055,22 @@ def _validate_semantics(spec: CalculationSpec) -> None:
     odp_section = next(
         (call for call in spec.modifiers if call.name == "odp"), None
     )
+    qmmm_md_driver = driver.name == "md" and qmmm_section is not None
     for independent_control in ("droplet", "solute_com", "flexible"):
         control = next(
             (call for call in spec.modifiers if call.name == independent_control),
             None,
         )
-        if control is not None and driver.name != "namd":
-            raise OQPInputError(
-                "%s(...) is currently connected only to namd(...)" %
-                independent_control
-            )
+        if control is None or driver.name == "namd":
+            continue
+        if independent_control != "flexible" and qmmm_md_driver:
+            continue
+        raise OQPInputError(
+            "%s(...) is currently connected only to namd(...)%s" % (
+                independent_control,
+                "" if independent_control == "flexible"
+                else " and QM/MM md(...) qmmm(...)")
+        )
     input_section = next(
         (call for call in spec.modifiers if call.name == "input"), None
     )
@@ -2099,10 +2105,11 @@ def _validate_semantics(spec: CalculationSpec) -> None:
     if odp_section is not None:
         if odp_section.args:
             raise OQPInputError("odp accepts keyword arguments only")
-        if (driver.name != "namd"
+        if (driver.name != "namd" and not qmmm_md_driver
                 and requested(odp_section.kwargs.get("enabled", False))):
             raise OQPInputError(
-                "odp(...) currently requires the namd(...) workflow"
+                "odp(...) currently requires the namd(...) workflow or "
+                "QM/MM md(...) qmmm(...)"
             )
     if states and set(_driver_options(driver)).intersection({"active", "init_state"}):
         key = sorted(set(_driver_options(driver)).intersection({"active", "init_state"}))[0]
