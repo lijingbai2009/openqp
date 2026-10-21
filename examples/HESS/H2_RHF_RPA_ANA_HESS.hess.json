@@ -358,7 +358,7 @@
     0.9854085022082318
   ],
   "infrared_intensities": [
-    8.948325721999845e-24
+    2.064500007247688e-22
   ],
   "raman_activities": [
     1167.4780824115794
@@ -369,7 +369,7 @@
     "property_kernels": "electric_dipole_au,cphf_static_polarizability,vibrational_intensities_native",
     "displacement_bohr": 0.001,
     "ir_units": "km/mol",
-    "raman_units": "a.u."
+    "raman_units": "bohr^4/amu"
   },
   "infrared_mode_dipole_derivatives": [
     [

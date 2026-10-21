@@ -14,6 +14,7 @@ module c_interop
             oqp_set_atoms
 
   public oqp_handle_t
+  public oqp_alloc_create_code
 
   public oqp_init
   public oqp_handle_refresh_ptr
@@ -393,10 +394,14 @@ contains
 !> @param[in]    v[out]        Pointer to the data
 !> @return       positive value:  success, returns size of the data
 !>               negative values: -1 - handle not initialized;
-!>                                -2 - data not available
+!>                                -2 - out of memory: tagarray could not
+!>                                     allocate the record, or the created
+!>                                     record has no data pointer
 !>                                -3 - tagarray refused to create the record
-!>                                     (invalid tag, record conflict); no
+!>                                     (invalid tag, invalid dimensions or
+!>                                     element count, record conflict); no
 !>                                     pointer is returned
+!>               The create status is mapped by oqp_alloc_create_code.
   function oqp_alloc(c_handle, tag, type_id, ndims, dims, v) result(n) bind(C, name='oqp_alloc')
     use strings, only: c_f_char
     use oqp_tagarray_driver, only: tagarray_get_cptr
@@ -427,11 +432,34 @@ contains
     ! record that lookup finds was not created by this call, and the caller
     ! would copy its own buffer into storage of a different size.
     v = c_null_ptr
-    n = -3
-    if (status_ /= TA_OK) return
+    n = oqp_alloc_create_code(status_)
+    if (n /= 0) return
     ! 2. Get the pointer to the freshly allocated data
     n = tagarray_get_cptr(inf%dat, tag_str, v, type_id, ndims, dims, data_size)
     if (.not.c_associated(v))  n = -2
+
+  end function
+
+!--------------------------------------------------------------------------------
+
+!> @brief oqp_alloc return code for a tagarray Container::create status
+!> @details An allocation failure must reach Python as MemoryError (-2), not
+!>          as the invalid-tag/invalid-dimension ValueError (-3).
+!> @param[in]    status  tagarray create status (TA_* from tagarray_defines)
+!> @return       0 for TA_OK, -2 for TA_MEMORY_ALLOCATION_ERROR, -3 otherwise
+  pure function oqp_alloc_create_code(status) result(n)
+    use tagarray_defines, only: TA_OK, TA_MEMORY_ALLOCATION_ERROR
+    integer(c_int32_t), intent(in) :: status
+    integer(c_int64_t) :: n
+
+    select case (status)
+    case (TA_OK)
+      n = 0
+    case (TA_MEMORY_ALLOCATION_ERROR)
+      n = -2
+    case default
+      n = -3
+    end select
 
   end function
 

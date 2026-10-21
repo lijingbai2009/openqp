@@ -260,7 +260,7 @@ SECTION_NAMES = {
     "input", "d4", "mp2", "cc", "guess", "pcm", "dftb", "symmetry", "scf",
     "dftgrid", "tdhf", "ekt", "properties", "optimize", "geometric",
     "oqp", "neb", "hess", "nac", "md", "odp", "qmmm", "droplet",
-    "solute_com", "json", "tests",
+    "solute_com", "flexible", "json", "tests",
     # Native multiconfigurational wavefunction stack.
     "cas", "casscf", "ci", "fci", "pt2", "state_average",
 }
@@ -292,6 +292,10 @@ GENERIC_SCHEMA_KEYS = {
         max_penetration
     """),
     "solute_com": _keys("enabled center force_constant atoms"),
+    "flexible": _keys("""
+        enabled alpha temperature center atoms point anchor resnames
+        threshold scale max_iterations keep_below_threshold
+    """),
     "input": _keys("library perf ispher d4 qmmm_flag soc_2e omp_threads verbose"),
     "d4": _keys("s6 s8 s9 a1 a2 alp"),
     "mp2": _keys("variant transform same_spin_scale opposite_spin_scale"),
@@ -338,7 +342,7 @@ GENERIC_SCHEMA_KEYS = {
         ixcore z_solver gmres_dim resp_cutoff fp32 zv_warmstart pair_cache
     """),
     "ekt": frozenset(),
-    "properties": _keys("scf_prop nmr_gauge acid_spacing acid_padding td_prop nac export title back_door"),
+    "properties": _keys("scf_prop nmr_gauge acid_spacing acid_padding td_prop grad_s grad_t nac soc export title back_door"),
     "optimize": frozenset(),
     "geometric": frozenset(),
     "oqp": frozenset(),
@@ -718,8 +722,8 @@ DRIVER_OPTIONS = {
     },
     "ekt": {"ip", "ea"},
     "thermo": {"type", "dx", "nproc", "read", "restart", "temperature", "clean"},
-    "prop": {"scf_prop", "nmr_gauge", "td_prop", "export", "title"},
-    "data": {"scf_prop", "nmr_gauge", "td_prop", "export", "title"},
+    "prop": {"scf_prop", "nmr_gauge", "td_prop", "soc", "export", "title"},
+    "data": {"scf_prop", "nmr_gauge", "td_prop", "soc", "export", "title"},
 }
 
 # ``oqp(...)`` was an early concise spelling for options consumed by the native
@@ -2051,7 +2055,7 @@ def _validate_semantics(spec: CalculationSpec) -> None:
     odp_section = next(
         (call for call in spec.modifiers if call.name == "odp"), None
     )
-    for independent_control in ("droplet", "solute_com"):
+    for independent_control in ("droplet", "solute_com", "flexible"):
         control = next(
             (call for call in spec.modifiers if call.name == independent_control),
             None,
@@ -2098,14 +2102,7 @@ def _validate_semantics(spec: CalculationSpec) -> None:
         if (driver.name != "namd"
                 and requested(odp_section.kwargs.get("enabled", False))):
             raise OQPInputError(
-                "odp(...) currently requires the NVE namd(...) workflow"
-            )
-        if (driver.name == "namd"
-                and requested(odp_section.kwargs.get("enabled", False))
-                and str(options.get("ensemble", "nve")).strip().lower()
-                != "nve"):
-            raise OQPInputError(
-                "odp(...) currently requires ensemble=nve in namd(...)"
+                "odp(...) currently requires the namd(...) workflow"
             )
     if states and set(_driver_options(driver)).intersection({"active", "init_state"}):
         key = sorted(set(_driver_options(driver)).intersection({"active", "init_state"}))[0]
@@ -2840,6 +2837,9 @@ def lower_to_legacy(
         method = "tdhf"
 
     states = list(_driver_states(spec.driver))
+    # Whether the driver itself named its states; a route default below is not
+    # a gradient request in a spin-orbit run (see the post-pass at the end).
+    driver_named_states = bool(states)
     if not states:
         default = _default_state(spec)
         if default is not None:
@@ -3178,6 +3178,51 @@ def lower_to_legacy(
     elif driver_options:
         raise OQPInputError("%s does not accept driver options" % name)
 
+    # A spin-orbit run solves two response ladders, so a gradient index has to
+    # say which one it belongs to.  The spin letter of the state label picks the
+    # key: prop(S1, soc=true) asks for the singlet manifold and prop(T1,
+    # soc=true) for the triplet one.  prop() takes one target state, so a deck
+    # that wants both names the other ladder explicitly, e.g.
+    # prop(S1) properties(soc=true, grad_t=2).
+    #
+    # Only states the driver named are requests: the route default that fills
+    # an empty prop()/data() is not, so prop(soc=true) properties(grad_t=2)
+    # asks for the triplet gradient alone.  An explicit properties(grad_s=...)
+    # or grad_t=... is the user's list for that ladder; a driver state that
+    # disagrees with it is a contradiction and is refused, never overwritten.
+    properties = config.get("properties", {})
+    if str(properties.get("soc", "")).strip().lower() in ("true", "1", "yes", "on") \
+            and "grad" in properties:
+        properties.pop("grad")
+        by_key: Dict[str, List[int]] = {}
+        for state, root in zip(states if driver_named_states else [], roots):
+            letter = (state.label or "S")[0].upper()
+            if letter not in ("S", "T"):
+                raise OQPInputError(
+                    "A spin-orbit run takes gradient selectors per spin ladder, "
+                    "so %s has no key to lower to; use an S or T state"
+                    % state.label)
+            by_key.setdefault("grad_s" if letter == "S" else "grad_t", []).append(root)
+        for key, values in by_key.items():
+            if key in properties:
+                try:
+                    explicit = [int(item) for item in
+                                str(properties[key]).replace(",", " ").split()]
+                except ValueError:
+                    raise OQPInputError(
+                        "properties(%s=%s) must list integer response roots"
+                        % (key, properties[key])) from None
+                if sorted(set(values)) != sorted(set(explicit)):
+                    raise OQPInputError(
+                        "The %s gradient is requested twice with different "
+                        "roots: the driver state gives %s and properties(%s=%s) "
+                        "gives %s; name it in one place"
+                        % ("singlet" if key == "grad_s" else "triplet",
+                           ",".join(str(v) for v in values), key,
+                           properties[key], ",".join(str(v) for v in explicit)))
+                continue
+            put("properties", key, ",".join(str(value) for value in values))
+
     # Defensive final pass: ConfigParser.load_dict requires strings.
     return {
         section: {key: _as_config_string(value) for key, value in values.items()}
@@ -3310,6 +3355,21 @@ def _normalize_typed_value(type_name: str, value: Any) -> Any:
     return text.lower()
 
 
+#: PT2 methods that name their own zeroth-order Hamiltonian and contraction
+#: (``input.method`` -> ``([pt2] h0, [pt2] contraction)``).  ``[pt2] h0`` and
+#: ``contraction`` have blank schema defaults meaning "the method's own value";
+#: every PT2 method not listed here resolves a blank h0 to ``fock`` and a blank
+#: contraction to uncontracted.  The single source for the runtime option
+#: reader (oqp.library.caspt2_dyall), preflight (oqp.utils.input_checker) and
+#: the effective-config comparison below; it lives here because this module
+#: must stay importable without liboqp.
+PT2_METHOD_IMPLIED = {
+    "nevpt2": ("dyall", "none"),
+    "sc-nevpt2": ("dyall", "strong"),
+    "scnevpt2": ("dyall", "strong"),
+}
+
+
 def _effective_config(
     config: Mapping[str, Mapping[str, str]],
     schema: Mapping[str, Mapping[str, Tuple[str, Any]]],
@@ -3328,6 +3388,15 @@ def _effective_config(
         for key, raw in values.items():
             if section not in schema or key not in schema[section]:
                 effective[(section, key)] = ("explicit", str(raw))
+    # A blank [pt2] h0 / contraction is the method's own value; resolve it the
+    # way the runtime does, so restating that value is recognized as a default.
+    method = str(effective.get(("input", "method"), "")).strip().lower()
+    implied_h0, implied_contraction = PT2_METHOD_IMPLIED.get(method, (None, None))
+    if effective.get(("pt2", "h0")) == "":
+        effective[("pt2", "h0")] = implied_h0 or "fock"
+    if effective.get(("pt2", "contraction")) == "":
+        effective[("pt2", "contraction")] = (
+            "strong" if implied_contraction == "strong" else "uncontracted")
     return effective
 
 
