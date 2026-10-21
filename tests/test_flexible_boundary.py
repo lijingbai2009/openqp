@@ -670,3 +670,69 @@ def test_soc_namd_refuses_flexible_because_its_force_paths_skip_restraints():
     assert "self.flexible_enabled" in guard
     soc = source[source.index("class NAMD_SOC_QMMM"):]
     assert "_evaluate_conservative_restraints" not in soc
+
+
+def test_triclinic_cell_and_empty_solute_centre_are_refused():
+    """Coordinate restraints (ODP CVs, FlexiBLE) take the cell from
+    OpenQpQMMM._box_lengths_bohr, which must refuse off-diagonal box vectors
+    instead of reducing them to the diagonal; and center=solute with no
+    non-solvent QM atom must say so."""
+    pytest.importorskip("openmm")
+    import subprocess
+    import sys
+
+    from oqp_module_isolation import child_env
+    script = """
+import json
+import numpy as np
+import openmm.app as app
+import openmm.unit as unit
+from oqp.library.qmmm_driver import OpenQpQMMM
+from oqp.library.namd import NAMD
+
+out = {}
+topology = app.Topology()
+chain = topology.addChain()
+for _ in range(3):
+    residue = topology.addResidue("HOH", chain)
+    for name, element in (("O", "O"), ("H1", "H"), ("H2", "H")):
+        topology.addAtom(name, app.Element.getBySymbol(element), residue)
+driver = OpenQpQMMM.__new__(OpenQpQMMM)
+driver.Cutoff = app.PME
+driver.topology = topology
+topology.setPeriodicBoxVectors([
+    (20.0, 0.0, 0.0)*unit.angstrom, (0.0, 22.0, 0.0)*unit.angstrom,
+    (0.0, 0.0, 24.0)*unit.angstrom])
+out["orthorhombic"] = (driver._box_lengths_bohr()/OpenQpQMMM._ANG2BOHR).tolist()
+topology.setPeriodicBoxVectors([
+    (20.0, 0.0, 0.0)*unit.angstrom, (5.0, 22.0, 0.0)*unit.angstrom,
+    (0.0, 0.0, 24.0)*unit.angstrom])
+try:
+    driver._box_lengths_bohr()
+    out["triclinic"] = None
+except NotImplementedError as exc:
+    out["triclinic"] = str(exc)
+
+namd = NAMD.__new__(NAMD)
+namd._init_flexible_boundary({"enabled": True, "alpha": 5.0,
+                              "temperature": 300.0, "center": "solute"})
+try:
+    namd._setup_flexible_boundary(topology, list(range(6)), np.ones(9))
+    out["empty_center"] = None
+except ValueError as exc:
+    out["empty_center"] = str(exc)
+print("CELL=" + json.dumps(out))
+"""
+    result = subprocess.run([sys.executable, "-c", script], env=child_env(),
+                            capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        if "cannot load" in result.stderr or "No module named" in result.stderr:
+            pytest.skip("compiled OpenQP runtime is not available")
+        pytest.fail(result.stdout + result.stderr)
+    marker = next(line for line in result.stdout.splitlines()
+                  if line.startswith("CELL="))
+    values = json.loads(marker.removeprefix("CELL="))
+    assert values["orthorhombic"] == pytest.approx([20.0, 22.0, 24.0], abs=1e-9)
+    assert "orthorhombic boxes only" in values["triclinic"]
+    assert "center=solute selected no atoms" in values["empty_center"]
+    assert "solvent residue" in values["empty_center"]

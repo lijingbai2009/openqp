@@ -1314,6 +1314,13 @@ class NAMD:
             else:
                 solvent = set(i for m in qm_molecules for i in m)
                 atoms = [i for i in sorted(qm) if i not in solvent]
+            if not len(atoms):
+                raise ValueError(
+                    "[flexible] center=solute selected no atoms: "
+                    + ("atoms is empty" if self.flexible_atoms_spec else
+                       "every QM atom belongs to a solvent residue; give the "
+                       "solute atoms in atoms=, or use center=point")
+                    + ".")
             atoms = self._single_atom_groups(
                 len(masses), atoms, '[flexible]').nonzero()[0]
             center = ('atoms', atoms)
