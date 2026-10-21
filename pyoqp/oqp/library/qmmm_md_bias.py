@@ -325,7 +325,12 @@ def _forcefield_path(name):
 
 def mm_hamiltonian_identity(forcefield_files, options):
     """Content digests of the force-field files and the QM/MM Hamiltonian
-    options, so windows sampled with different potentials are not combined."""
+    options, so windows sampled with different potentials are not combined.
+
+    The files are recorded by content alone, in loading order (the given
+    files, then their includes): a renamed copy is the same force field.
+    An include is named inside its parent, whose digest therefore also
+    fixes the dependency structure."""
     import xml.etree.ElementTree as ElementTree
 
     files = []
@@ -333,22 +338,21 @@ def mm_hamiltonian_identity(forcefield_files, options):
     # follow <Include file="..."> transitively, resolved as OpenMM's
     # ForceField.loadFile resolves it (next to the including file when that
     # exists there, otherwise through the data directories)
-    queue = [(os.path.basename(str(name)), _forcefield_path(str(name)))
-             for name in forcefield_files]
+    queue = [_forcefield_path(str(name)) for name in forcefield_files]
     while queue:
-        label, path = queue.pop(0)
+        path = queue.pop(0)
         real = os.path.realpath(path)
         if real in seen:
             continue
         seen.add(real)
         with open(real, "rb") as stream:
             data = stream.read()
-        files.append([label, hashlib.sha256(data).hexdigest()])
+        files.append(hashlib.sha256(data).hexdigest())
         for included in ElementTree.fromstring(data).findall("Include"):
             name = included.attrib["file"]
             joined = os.path.join(os.path.dirname(path), name)
-            queue.append((name, joined if os.path.isfile(joined)
-                          else _forcefield_path(name)))
+            queue.append(joined if os.path.isfile(joined)
+                         else _forcefield_path(name))
     return {"forcefield_files": files,
             "options": {k: options[k] for k in sorted(options)}}
 
