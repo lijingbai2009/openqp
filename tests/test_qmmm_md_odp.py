@@ -470,6 +470,11 @@ def test_qm_surface_identity_binds_every_surface_option(tmp_path):
     cfg["input"]["basis"] = "file:custom.basis"
     first = qm_surface_identity(cfg, str(tmp_path / "window.oqp"))
     assert len(first["input"]["basis"]["sha256"]) == 64
+    # the same contents under another file name are the same basis
+    (tmp_path / "renamed.basis").write_text("H 0\nS 1 1.0\n 1.0 1.0\n")
+    renamed = {k: dict(v) for k, v in cfg.items()}
+    renamed["input"]["basis"] = "file:renamed.basis"
+    assert qm_surface_identity(renamed, str(tmp_path / "window.oqp")) == first
     (tmp_path / "custom.basis").write_text("H 0\nS 1 1.0\n 2.0 1.0\n")
     assert qm_surface_identity(cfg, str(tmp_path / "window.oqp")) != first
 

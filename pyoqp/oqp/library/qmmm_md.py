@@ -1639,10 +1639,14 @@ class QMMM_MD:
             i, j, dist = self.system_md.getConstraintParameters(k)
             constraints.update(("%d-%d:%.12g;" % (
                 i, j, dist.value_in_unit(unit.nanometer))).encode())
+        surface = qm_surface_identity(
+            cfg, getattr(self.mol, "input_file", None))
         electronic = {
             "method": str(inp.get("method", "")).lower(),
             "functional": str(inp.get("functional", "")).lower(),
-            "basis": str(inp.get("basis", "")).lower(),
+            "basis": (surface["input"]["basis"]
+                      if isinstance(surface["input"]["basis"], dict)
+                      else str(inp.get("basis", "")).lower()),
             "charge": str(inp.get("charge", "0")),
             "scf_type": str(scf.get("type", "")).lower(),
             "scf_multiplicity": str(scf.get("multiplicity", "1")),
@@ -1658,8 +1662,7 @@ class QMMM_MD:
                 }),
             # every QM option that changes the surface, with file-backed
             # basis definitions addressed by content
-            "qm_surface": qm_surface_identity(
-                cfg, getattr(self.mol, "input_file", None)),
+            "qm_surface": surface,
             # ESPF environment controls and the content of DFTB/xTB backend
             # artifacts, both fixed when the run is set up
             "espf_environment": self._espf_identity,

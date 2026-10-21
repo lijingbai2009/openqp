@@ -349,9 +349,10 @@ def qm_surface_identity(config, input_file=None):
         value = identity.get(section, {}).get(key)
         if isinstance(value, str) and value.startswith("file:"):
             path = os.path.join(directory, value[len("file:"):])
-            identity[section][key] = {
-                "file": os.path.basename(path),
-                "sha256": _file_digest(path) if os.path.isfile(path) else None}
+            # by content alone: a copy under another name is the same basis
+            identity[section][key] = (
+                {"sha256": _file_digest(path)} if os.path.isfile(path)
+                else {"missing": value})
     return identity
 
 
