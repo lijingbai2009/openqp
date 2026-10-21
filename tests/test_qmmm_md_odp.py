@@ -313,6 +313,17 @@ def test_window_identity_binds_the_mm_hamiltonian(tmp_path):
         assert mm_hamiltonian_identity([str(local), "tip5p.xml"], changed) != base
     with pytest.raises(FileNotFoundError):
         mm_hamiltonian_identity(["no-such-forcefield.xml"], options)
+    # an aggregate force field is hashed together with every included file
+    amber = mm_hamiltonian_identity(["amber14-all.xml"], options)
+    assert len(amber["forcefield_files"]) > 1
+    parent = tmp_path / "aggregate.xml"
+    child = tmp_path / "part.xml"
+    child.write_text("<ForceField>\n</ForceField>\n")
+    parent.write_text('<ForceField>\n <Include file="part.xml"/>\n</ForceField>\n')
+    first = mm_hamiltonian_identity([str(parent)], options)
+    assert [f[0] for f in first["forcefield_files"]] == ["aggregate.xml", "part.xml"]
+    child.write_text("<ForceField>\n<!-- edited -->\n</ForceField>\n")
+    assert mm_hamiltonian_identity([str(parent)], options) != first
 
 
 def test_periodic_bias_refuses_a_triclinic_cell():
@@ -496,6 +507,19 @@ def test_window_identity_binds_espf_controls_and_tb_backend_contents(
     # the same paths with other contents are another Hamiltonian
     (params / "H-H.skf").write_text("second\n")
     assert tight_binding_identity(mol) != first
+    # a copy of the same artifacts in another directory is the same backend
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    (copy / "params").mkdir()
+    (copy / "params" / "H-H.skf").write_text("second\n")
+    (copy / "probe").write_text("#!/bin/sh\n")
+    copied = types.SimpleNamespace(
+        config={"input": {"method": "dftb"},
+                "dftb": {"parameter_path": str(copy / "params"),
+                         "backend": "probe",
+                         "executable": str(copy / "probe")}},
+        input_file=str(copy / "window.oqp"), oqp_input_source=None)
+    assert tight_binding_identity(copied) == tight_binding_identity(mol)
     # the path spellings themselves are not part of the surface identity
     other = {"input": {"method": "dftb"},
              "dftb": dict(config["dftb"], parameter_path="elsewhere")}

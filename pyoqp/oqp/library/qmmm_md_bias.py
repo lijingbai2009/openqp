@@ -296,11 +296,29 @@ def _forcefield_path(name):
 def mm_hamiltonian_identity(forcefield_files, options):
     """Content digests of the force-field files and the QM/MM Hamiltonian
     options, so windows sampled with different potentials are not combined."""
+    import xml.etree.ElementTree as ElementTree
+
     files = []
-    for name in forcefield_files:
-        with open(_forcefield_path(str(name)), "rb") as stream:
-            files.append([os.path.basename(str(name)),
-                          hashlib.sha256(stream.read()).hexdigest()])
+    seen = set()
+    # follow <Include file="..."> transitively, resolved as OpenMM's
+    # ForceField.loadFile resolves it (next to the including file when that
+    # exists there, otherwise through the data directories)
+    queue = [(os.path.basename(str(name)), _forcefield_path(str(name)))
+             for name in forcefield_files]
+    while queue:
+        label, path = queue.pop(0)
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        with open(real, "rb") as stream:
+            data = stream.read()
+        files.append([label, hashlib.sha256(data).hexdigest()])
+        for included in ElementTree.fromstring(data).findall("Include"):
+            name = included.attrib["file"]
+            joined = os.path.join(os.path.dirname(path), name)
+            queue.append((name, joined if os.path.isfile(joined)
+                          else _forcefield_path(name)))
     return {"forcefield_files": files,
             "options": {k: options[k] for k in sorted(options)}}
 
@@ -361,7 +379,17 @@ def tight_binding_identity(mol):
     for name in ("_effective_tight_binding_settings",
                  "_resolved_tight_binding_artifacts", "_tight_binding_identity"):
         setattr(view, name, types.MethodType(getattr(NAMD, name), view))
-    return view._tight_binding_identity()
+    identity = view._tight_binding_identity()
+    # copies of the same artifacts in other directories are the same
+    # Hamiltonian: keep the content digests, not the resolved paths
+    settings = {}
+    for key, value in identity["settings"].items():
+        if isinstance(value, dict) and "sha256" in value:
+            value = {"sha256": value["sha256"]}
+        elif isinstance(value, dict) and "resolved" in value:
+            value = {"missing": os.path.basename(str(value["resolved"]))}
+        settings[key] = value
+    return {"section": identity["section"], "settings": settings}
 
 
 def topology_identity(topology, qm_atoms, electronic):
