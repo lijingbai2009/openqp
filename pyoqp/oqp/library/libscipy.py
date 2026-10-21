@@ -951,8 +951,17 @@ class MECPOpt(Optimizer):
 
         return energy_j, energy_i, grad_j, grad_i
 
-    def record(self, coordinates, f, df, gap_e, gap_term):
-        """Store metrics, append the status row, and return (f, df)."""
+    def record(self, coordinates, f, df, gap_e, gap_term, mean_e):
+        """Store metrics, append the status row, and return (f, df).
+
+        ``f`` and ``df`` are the search objective and its gradient, which is
+        what the convergence test reads: the augmented Lagrangian, the SQP
+        Lagrangian at the current multiplier, or a penalty function.  None of
+        them is an energy of the system away from the seam (the SQP multiplier
+        alone can move f by 0.1 Eh at a 2 mEh gap), so the physical
+        mean energy 0.5 * (E_i + E_j) is recorded beside it rather than
+        replaced by it.
+        """
         de = f - self.pre_energy
         rmsd_step = np.mean((coordinates - self.pre_coord) ** 2) ** 0.5
         max_step = np.amax(np.abs(coordinates - self.pre_coord))
@@ -967,13 +976,16 @@ class MECPOpt(Optimizer):
         self.metrics['max_step'] = max_step
         self.metrics['rmsd_grad'] = rmsd_grad
         self.metrics['max_grad'] = max_grad
+        self.metrics['energy'] = mean_e
+        self.metrics['objective'] = f
 
         # store energy and coordinates
         self.pre_energy = f
         self.pre_coord = coordinates.copy()
         dump_data(
             self.mol,
-            (self.itr, self.atoms, coordinates, f, de, gap_e, rmsd_step, max_step, rmsd_grad, max_grad, rmsd_gap, max_gap),
+            (self.itr, self.atoms, coordinates, mean_e, f, de, gap_e, rmsd_step, max_step,
+             rmsd_grad, max_grad, rmsd_gap, max_gap),
             title='MECP',
             fpath=self.mol.log_path,
         )
@@ -1037,7 +1049,8 @@ class MECPOpt(Optimizer):
         self.mu_scaled = 2.0 * self.mu / norm
         self.metrics['lagrange'] = lagrange
 
-        return self.record(coordinates, f, df, gap_e, gap_term)
+        return self.record(coordinates, f, df, gap_e, gap_term,
+                           mean_e=(energy_i + energy_j) * 0.5)
 
     def sqp(self, coordinates, energies, grads):
         """
@@ -1080,7 +1093,8 @@ class MECPOpt(Optimizer):
         df = mean_g + gap_term
         self.metrics['lagrange'] = self.lagrange
 
-        return self.record(coordinates, f, df, gap_e, gap_term)
+        return self.record(coordinates, f, df, gap_e, gap_term,
+                           mean_e=self.sqp_point['mean_e'])
 
     def penalty(self, coordinates, energies, grads):
         """
@@ -1120,7 +1134,8 @@ class MECPOpt(Optimizer):
 
         self.metrics['sigma'] = self.sigma
 
-        return self.record(coordinates, f, df, gap_e, gap_term)
+        return self.record(coordinates, f, df, gap_e, gap_term,
+                           mean_e=(energy_i + energy_j) * 0.5)
 
     def quad(self, coordinates, energies, grads):
         """
@@ -1146,7 +1161,8 @@ class MECPOpt(Optimizer):
         df2 = 2 * gap_e * gap_g
         df = df1 + self.weights * df2
 
-        return self.record(coordinates, f, df, gap_e, df2)
+        return self.record(coordinates, f, df, gap_e, df2,
+                           mean_e=(energy_i + energy_j) * 0.5)
 
     def check_convergence(self):
         # write convergence to log
@@ -1452,10 +1468,12 @@ class SQPMECPOpt(MECPOpt):
             counter, budget = self.itr, self.maxit
             self.maxit = counter + 1
 
-            def quiet_record(coords, value, gradient, gap, gap_term):
+            def quiet_record(coords, value, gradient, gap, gap_term, mean_e):
                 # Refresh the metrics without appending a status row: this is
                 # the geometry the search already visited, not a new step.
                 self.metrics['gap'] = gap
+                self.metrics['energy'] = mean_e
+                self.metrics['objective'] = value
                 self.metrics['rmsd_grad'] = np.mean(gradient ** 2) ** 0.5
                 self.metrics['max_grad'] = np.amax(np.abs(gradient))
                 return value, gradient

@@ -141,8 +141,9 @@ def make_mecp(search, **attributes):
     for key, value in attributes.items():
         setattr(opt, key, value)
     # keep the objectives free of file I/O and optimizer bookkeeping
-    def _record(coordinates, f, df, gap_e, gap_term):
+    def _record(coordinates, f, df, gap_e, gap_term, mean_e):
         opt.metrics["gap"] = gap_e
+        opt.metrics["energy"] = mean_e
         return f, df
 
     opt.record = _record
@@ -341,6 +342,37 @@ class MECPSQPTest(unittest.TestCase):
                 self.fail("SQPMECPOpt reads gap_sigma")
             if isinstance(node, ast.Attribute) and node.attr == "mu":
                 self.fail("SQPMECPOpt reads the auglag penalty parameter")
+
+
+class MECPRecordedEnergyTest(unittest.TestCase):
+    """The status table reports the mean state energy, not the objective.
+
+    Every MECP objective adds a gap term to 0.5 * (E_i + E_j).  With the SQP
+    multiplier at -53, as at step 4 of the twisted-ethylene MECP, that term
+    moved the reported "Energy" 0.12 Eh below both states at a 2.3 mEh gap.
+    """
+
+    POINT = np.array([1.2, 0.4])
+
+    def _evaluate(self, search, **attributes):
+        opt = make_mecp(search, **attributes)
+        e_lo, g_lo, e_up, g_up = model(self.POINT)
+        energies = np.array([0.0, e_lo, 0.0, e_up])
+        grads = np.array([np.zeros(2), g_lo, np.zeros(2), g_up])
+        f, _ = getattr(opt, search)(self.POINT, energies, grads)
+        return opt, f, 0.5 * (e_lo + e_up), e_up - e_lo
+
+    def test_every_objective_records_the_mean_state_energy(self):
+        for search in ("auglag", "sqp", "penalty", "quad"):
+            with self.subTest(search=search):
+                opt, f, mean, gap = self._evaluate(search, lagrange=-53.0)
+                self.assertAlmostEqual(opt.metrics["energy"], mean, places=14)
+                self.assertNotAlmostEqual(f, mean, places=6)
+
+    def test_sqp_objective_is_the_lagrangian_at_the_multiplier(self):
+        opt, f, mean, gap = self._evaluate("sqp", lagrange=-53.0)
+        self.assertAlmostEqual(f, mean - 53.0 * gap, places=12)
+        self.assertAlmostEqual(opt.metrics["energy"], mean, places=14)
 
 
 class MECIObjectiveTest(unittest.TestCase):
