@@ -45,6 +45,21 @@ def _stub(name, is_package=False):
     return module
 
 
+# Pure-Python oqp modules loaded from source, ahead of the files under test.
+# tests/test_crossing_harness_imports.py checks that these together with the
+# _stub() names cover every module-level oqp import of LOADED_FILES.
+SOURCE_MODULES = (
+    ("oqp.library.baeka", "pyoqp/oqp/library/baeka.py"),
+    # input_checker imports PT2_METHOD_IMPLIED from it; the module is pure
+    # Python, so the real definition is used rather than a copy
+    ("oqp.utils.oqp_input", "pyoqp/oqp/utils/oqp_input.py"),
+)
+LOADED_FILES = (
+    "pyoqp/oqp/library/libscipy.py",
+    "pyoqp/oqp/utils/input_checker.py",
+)
+
+
 def _load_isolated(path, extra_module=None):
     """Import a pyoqp module against stubs, then restore sys.modules."""
     # pytest shares one interpreter across test modules: the stubs, and the
@@ -74,7 +89,9 @@ def _load_isolated(path, extra_module=None):
 
     try:
         # baeka is pure NumPy, so the real kernel is used
-        baeka = _load("oqp.library.baeka", "pyoqp/oqp/library/baeka.py")
+        sources = {name: _load(name, relative)
+                   for name, relative in SOURCE_MODULES}
+        baeka = sources["oqp.library.baeka"]
         loaded = _load("oqp.library.libscipy", path)
         checker = (_load(extra_module[0], extra_module[1])
                    if extra_module else None)
@@ -85,8 +102,8 @@ def _load_isolated(path, extra_module=None):
 
 
 libscipy, baeka_module, input_checker = _load_isolated(
-    "pyoqp/oqp/library/libscipy.py",
-    extra_module=("oqp.utils.input_checker", "pyoqp/oqp/utils/input_checker.py"),
+    LOADED_FILES[0],
+    extra_module=("oqp.utils.input_checker", LOADED_FILES[1]),
 )
 BaekAState = baeka_module.BaekAState
 
