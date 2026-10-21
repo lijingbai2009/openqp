@@ -111,6 +111,20 @@ SCHEMA = {
         "trajectory_file": {"type": _string, "default": ""},
         "restart_file": {"type": _string, "default": ""},
     },
+    "flexible": {
+        "enabled": {"type": bool, "default": "False"},
+        "alpha": {"type": float, "default": "0.0"},
+        "temperature": {"type": float, "default": "0.0"},
+        "center": {"type": _string, "default": "solute"},
+        "atoms": {"type": str, "default": ""},
+        "point": {"type": str, "default": "0.0,0.0,0.0"},
+        "anchor": {"type": str, "default": "O"},
+        "resnames": {"type": str, "default": "hoh,wat,sol,tip3,tip3p"},
+        "threshold": {"type": float, "default": "0.01"},
+        "scale": {"type": float, "default": "0.1"},
+        "max_iterations": {"type": int, "default": "20"},
+        "keep_below_threshold": {"type": bool, "default": "False"},
+    },
     "odp": {
         "enabled": {"type": bool, "default": "False"},
         "cv": {"type": str, "default": ""},
@@ -413,6 +427,23 @@ class TestOpenQPNativeAPI(unittest.TestCase):
         self.assertEqual(config["odp"]["cv"], "distance(1,2);angle(1,2,3)")
         self.assertEqual(config["odp"]["scale"], "0.5,1.0")
         self.assertEqual(config["odp"]["window"], "7")
+
+    def test_flexible_section_is_exposed_through_settings_api(self):
+        openqp = load_openqp_module()
+        job = openqp.OpenQP(project="flexible_boundary")
+        job.settings.flexible(
+            enabled=True,
+            alpha=5.0,
+            temperature=300,
+            center="solute",
+            atoms="0-11",
+            anchor="O",
+        )
+        config = job.to_input_dict()
+        self.assertEqual(config["flexible"]["enabled"], "True")
+        self.assertEqual(config["flexible"]["alpha"], "5.0")
+        self.assertEqual(config["flexible"]["temperature"], "300")
+        self.assertEqual(config["flexible"]["atoms"], "0-11")
 
     def test_builtin_geometry_resolves_common_names(self):
         openqp = load_openqp_module()

@@ -176,6 +176,24 @@ OQP_CONFIG_SCHEMA = {
         'force_constant': {'type': float, 'default': '5.0'},
         'atoms': {'type': str, 'default': ''},
     },
+    # FlexiBLE QM/MM boundary (Shen and Glover, J. Chem. Phys. 155, 224112
+    # (2021)) between QM and MM solvent molecules of one residue kind.  alpha
+    # is per angstrom, point is angstrom, atoms are 0-based; see
+    # oqp/library/flexible_boundary.py.
+    'flexible': {
+        'enabled': {'type': bool, 'default': 'False'},
+        'alpha': {'type': float, 'default': '0.0'},
+        'temperature': {'type': float, 'default': '0.0'},
+        'center': {'type': string, 'default': 'solute'},
+        'atoms': {'type': str, 'default': ''},
+        'point': {'type': farray, 'default': '0.0,0.0,0.0'},
+        'anchor': {'type': str, 'default': 'O'},
+        'resnames': {'type': sarray, 'default': 'hoh,wat,sol,tip3,tip3p'},
+        'threshold': {'type': float, 'default': '0.01'},
+        'scale': {'type': float, 'default': '0.1'},
+        'max_iterations': {'type': int, 'default': '20'},
+        'keep_below_threshold': {'type': bool, 'default': 'False'},
+    },
     'input': {
         'charge': {'type': int, 'default': '0'},
         'basis': {'type': string, 'default': '6-31g*'},
