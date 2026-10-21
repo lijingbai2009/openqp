@@ -125,7 +125,7 @@ def normal_mode(coord, mass, hessian):
         mij = mi ** 0.5
         for j in range(3):
             tr[3*i+j, 3] = + mij * (p_xyz[i, 1] * p_axis[j, 2] - p_xyz[i, 2] * p_axis[j, 1])
-            tr[3*i+j, 4] = - mij * (p_xyz[i, 0] * p_axis[j, 2] + p_xyz[i, 2] * p_axis[j, 0])
+            tr[3*i+j, 4] = - mij * (p_xyz[i, 0] * p_axis[j, 2] - p_xyz[i, 2] * p_axis[j, 0])
             tr[3*i+j, 5] = + mij * (p_xyz[i, 0] * p_axis[j, 1] - p_xyz[i, 1] * p_axis[j, 0])
 
     u, s, v = np.linalg.svd(tr, full_matrices=True)
