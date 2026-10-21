@@ -421,6 +421,108 @@ class TestWriteXYZ(unittest.TestCase):
         self.assertIn("PyOQP rmsd grad:", text)
 
 
+class TestMECPStateLabels(unittest.TestCase):
+    """MECP joins two multiplicity solves into one energy array.
+
+    The final summary must label each block in its own multiplicity.  Before
+    the fix the triplet roots of ``mecp(S0,T0)`` with nstate=5 printed as
+    S5..S9 and the T0 gradient as S5.
+    """
+
+    def _render(self, info_energy, info_grad):
+        from tempfile import TemporaryDirectory
+
+        file_utils = load_file_utils()
+        # use the real labelling rules rather than the stub; state_labels
+        # imports only the pure log_format sibling, provided here so the
+        # compiled package is never imported
+        names = ("oqp", "oqp.utils", "oqp.utils.log_format")
+        saved = {name: sys.modules.get(name) for name in names}
+        try:
+            for name in names[:2]:
+                package = types.ModuleType(name)
+                package.__path__ = []
+                sys.modules[name] = package
+            format_spec = importlib.util.spec_from_file_location(
+                "oqp.utils.log_format", ROOT / "pyoqp/oqp/utils/log_format.py")
+            log_format = importlib.util.module_from_spec(format_spec)
+            sys.modules["oqp.utils.log_format"] = log_format
+            format_spec.loader.exec_module(log_format)
+            spec = importlib.util.spec_from_file_location(
+                "state_labels_for_mecp_test",
+                ROOT / "pyoqp/oqp/utils/state_labels.py",
+            )
+            labels = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(labels)
+        finally:
+            for name, module in saved.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+        file_utils.is_mrsf = labels.is_mrsf
+        file_utils.public_state_label = labels.public_state_label
+
+        with TemporaryDirectory() as folder:
+            log = Path(folder) / "mecp.log"
+            mol = minimal_log_mol(log)
+            mol.config["input"].update(method="tdhf", runtype="mecp")
+            mol.config["scf"].update(type="rohf", multiplicity=3)
+            mol.config["tdhf"].update(type="mrsf", multiplicity=1, nstate=5)
+            energies = info_energy["el"]
+            mol.energies = list(energies)
+            mol.grads = info_grad["el"]
+            file_utils.dump_log(mol, title="PyOQP: Final Energy",
+                                section="energy", info=info_energy)
+            file_utils.dump_log(mol, title="PyOQP: Final Gradient",
+                                section="grad", info=info_grad)
+            return log.read_text()
+
+    def test_triplet_block_is_labelled_t0_to_t4(self):
+        singlets = [-78.4066, -78.3101, -78.3081, -78.1360, -78.1345]
+        triplets = [-78.4066, -78.1515, -78.1472, -78.1470, -78.1417]
+        energies = [-78.4318] + singlets + triplets
+        blocks = ((1, 5), (3, 5))
+        grads = np.arange(11 * 2 * 3, dtype=float).reshape(11, 2, 3)
+        text = self._render(
+            {"el": energies, "d4": 0.0, "state_blocks": blocks},
+            {"el": grads, "d4": np.zeros((2, 3)), "grad_list": [1, 6],
+             "state_blocks": blocks},
+        )
+        energy_block = text.split("ENERGIES AND STATES", 1)[1].split(
+            "GRADIENTS AND PROPERTIES", 1)[0]
+        labels = [line.split()[1] for line in energy_block.splitlines()
+                  if line.strip().startswith("PyOQP ")
+                  and line.split()[1][:1] in "ST"
+                  and line.split()[1][1:].isdigit()]
+        self.assertEqual(
+            labels, ["S0", "S1", "S2", "S3", "S4", "T0", "T1", "T2", "T3", "T4"])
+        self.assertIn("triplet ROHF reference (internal)", energy_block)
+        gradient_block = text.split("GRADIENTS AND PROPERTIES", 1)[1]
+        self.assertIn("PyOQP T0", gradient_block)
+        self.assertNotIn("PyOQP S5", text)
+
+    def test_clipped_first_block_moves_the_triplet_start(self):
+        # nstate=5 but only 3 singlet roots were solved
+        energies = [-1.0, -0.9, -0.8, -0.7, -0.95, -0.85]
+        blocks = ((1, 3), (3, 2))
+        grads = np.zeros((6, 2, 3))
+        text = self._render(
+            {"el": energies, "d4": 0.0, "state_blocks": blocks},
+            {"el": grads, "d4": np.zeros((2, 3)), "grad_list": [1, 4],
+             "state_blocks": blocks},
+        )
+        self.assertIn("PyOQP S2 ", text)
+        self.assertIn("PyOQP T0 ", text)
+        self.assertIn("PyOQP T1 ", text)
+        self.assertNotIn("PyOQP S3", text)
+
+    def test_index_outside_the_blocks_is_an_error(self):
+        file_utils = load_file_utils()
+        with self.assertRaisesRegex(IndexError, "outside the 4 roots"):
+            file_utils.stacked_state_label({}, 5, ((1, 2), (3, 2)))
+
+
 class TestVerbosityInPythonLog(unittest.TestCase):
     def _energy_log(self, d4_flag, verbose=None):
         file_utils = load_file_utils()

@@ -35,6 +35,32 @@ from oqp.utils.state_labels import (
     spin_name,
 )
 
+def stacked_state_label(config, index, blocks):
+    """Label entry ``index`` of an energy array that joins several solves.
+
+    MECP evaluates each multiplicity in its own response solve and stores
+    ``[reference, roots of block 1, roots of block 2, ...]`` in one array.
+    ``blocks`` lists ``(multiplicity, nroots)`` for those solves in order, so
+    an index is labelled within the block it belongs to (T0 rather than S5).
+    """
+    index = int(index)
+    if index == 0:
+        return (public_state_label(config, 0) if is_mrsf(config)
+                else 'state 0')
+    start = 1
+    for mult, count in blocks:
+        mult, count = int(mult), int(count)
+        if index < start + count:
+            root = index - start + 1
+            if is_mrsf(config):
+                return public_state_label(config, root, multiplicity=mult)
+            return f'state {root} (multiplicity {mult})'
+        start += count
+    raise IndexError(
+        f'state index {index} lies outside the {start - 1} roots of the '
+        f'joined response blocks {tuple(blocks)}')
+
+
 def try_basis(basis, path=None, fallback='6-31g'):
     """try various basis file locations and return the matching one"""
 
@@ -488,9 +514,13 @@ def dump_log(mol, title=None, section=None, info=None, must_print=False):
             loginfo += (f'   PyOQP {"State":<34} {"Total (Hartree)":<16}'
                         f'{header}\n')
 
+        state_blocks = info.get('state_blocks')
+
         def energy_label(n):
             label = (public_state_label(mol.config, n, multiplicity=3)
                      if soc_triplet_ladder else
+                     stacked_state_label(mol.config, n, state_blocks)
+                     if state_blocks else
                      public_state_label(mol.config, n)
                      if is_mrsf(mol.config) else f'state {n}')
             return final_energy_label(dftb_summary, n, label)
@@ -530,9 +560,16 @@ def dump_log(mol, title=None, section=None, info=None, must_print=False):
            atoms = mol.get_atoms()
            loginfo += format_unit('Gradient', 'Hartree/Bohr') + '\n'
            loginfo += '   PyOQP electronic gradients\n'
+           state_blocks = info.get('state_blocks')
+
+           def grad_label(n):
+               if state_blocks:
+                   return stacked_state_label(mol.config, n, state_blocks)
+               return public_state_label(mol.config, n) if is_mrsf(mol.config) else f'state {n}'
+
            for n in info['grad_list']:
                grad = write_grad(atoms, info['el'][n])
-               label = public_state_label(mol.config, n) if is_mrsf(mol.config) else f'state {n}'
+               label = grad_label(n)
                loginfo += f'   PyOQP {label:<34}\n{grad}\n'
 
            d4 = info['d4']
@@ -541,7 +578,7 @@ def dump_log(mol, title=None, section=None, info=None, must_print=False):
            loginfo += '   PyOQP dispersion corrected gradients\n'
            for n in info['grad_list']:
                grad = write_grad(atoms, mol.grads[n])
-               label = public_state_label(mol.config, n) if is_mrsf(mol.config) else f'state {n}'
+               label = grad_label(n)
                loginfo += f'   PyOQP {label:<34}\n{grad}\n'
 
     if section in ('opt', 'QM/MM'):

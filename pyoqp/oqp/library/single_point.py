@@ -471,25 +471,32 @@ class LastStep(Calculator):
     def set_param(self, param):
         self.d4_param = param
 
-    def compute(self, mol, grad_list=None, spin_label=None):
+    def compute(self, mol, grad_list=None, spin_label=None, state_blocks=None):
         """Add the dispersion correction and publish the totals.
 
         ``spin_label`` ('s' or 't') publishes to the spin-labelled files; None
         keeps the unlabelled names.  The correction is added IN PLACE, so this
         may run only once per set of energies and gradients -- a second call on
         the same values would add dftd4 twice.
+
+        ``state_blocks`` describes an energy array that joins several response
+        solves, as ((multiplicity, nroots), ...) after the shared reference
+        entry.  Without it every root is labelled in the current target
+        multiplicity.
         """
         # do dftd4
         energy, grad = self.get_dispersion(mol, grad_list)
-        energies = self.final_energy(energy, spin_label=spin_label)
+        energies = self.final_energy(energy, spin_label=spin_label,
+                                     state_blocks=state_blocks)
 
         if not grad_list:
             return energies
 
-        grads = self.final_grad(grad, grad_list, spin_label=spin_label)
+        grads = self.final_grad(grad, grad_list, spin_label=spin_label,
+                                state_blocks=state_blocks)
         return energies, grads
 
-    def final_energy(self, d4_energy, spin_label=None):
+    def final_energy(self, d4_energy, spin_label=None, state_blocks=None):
         # add dftd4 energy
         el = self.mol.energies
         self.mol.energies = [x + d4_energy for x in el]
@@ -498,7 +505,7 @@ class LastStep(Calculator):
             self.mol,
             title='PyOQP: Final Energy',
             section='energy',
-            info={'el': el, 'd4': d4_energy}
+            info={'el': el, 'd4': d4_energy, 'state_blocks': state_blocks}
         )
 
         # export data
@@ -512,7 +519,7 @@ class LastStep(Calculator):
 
         return self.mol.energies
 
-    def final_grad(self, d4_grad, grad_list, spin_label=None):
+    def final_grad(self, d4_grad, grad_list, spin_label=None, state_blocks=None):
         # add dftd4 grad
         el = self.mol.grads
         self.mol.grads = [x + d4_grad for x in el]
@@ -521,7 +528,8 @@ class LastStep(Calculator):
             self.mol,
             title='PyOQP: Final Gradient',
             section='grad',
-            info={'el': el, 'd4': d4_grad, 'grad_list': grad_list}
+            info={'el': el, 'd4': d4_grad, 'grad_list': grad_list,
+                  'state_blocks': state_blocks}
         )
 
         # export data
