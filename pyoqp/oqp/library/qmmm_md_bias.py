@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 
 import numpy as np
 
@@ -46,17 +47,23 @@ def _vector3(value, label):
     return array
 
 
-def _index_list(spec):
+def _index_list(spec, natom, label):
+    """0-based atom indices of a list such as "0-3,7 9:11"; every index must
+    lie in [0, natom) and every range must ascend (no index from the end)."""
     out = []
     for token in str(spec or "").replace(",", " ").split():
-        if "-" in token[1:]:
-            first, last = token.split("-", 1)
-            out.extend(range(int(first), int(last) + 1))
-        elif ":" in token:
-            first, last = token.split(":", 1)
-            out.extend(range(int(first), int(last) + 1))
-        else:
-            out.append(int(token))
+        match = re.fullmatch(r"(\d+)(?:[-:](\d+))?", token)
+        if match is None:
+            raise ValueError(
+                f"{label} atoms: {token!r} is not a 0-based index or range")
+        first = int(match.group(1))
+        last = int(match.group(2)) if match.group(2) is not None else first
+        if last < first:
+            raise ValueError(f"{label} atoms: range {token!r} descends")
+        if last >= natom:
+            raise ValueError(
+                f"{label} atoms: index {last} is outside 0..{natom - 1}")
+        out.extend(range(first, last + 1))
     return out
 
 
@@ -124,7 +131,8 @@ class QMMMMDBias:
             s["target"] = target
             groups = np.zeros(natom, dtype=np.int64)
             if target == "atoms":
-                for k, atom in enumerate(sorted(set(_index_list(s["atoms_zero_based"])))):
+                for k, atom in enumerate(sorted(set(_index_list(s["atoms_zero_based"], natom,
+                                                                          "[droplet]")))):
                     groups[atom] = k + 1
             else:
                 group = 0
@@ -151,7 +159,9 @@ class QMMMMDBias:
         self.solute_com = _as_bool(solute.get("enabled", False))
         self._solute_selected = None
         if self.solute_com:
-            atoms = _index_list(solute.get("atoms", "")) or [int(i) for i in qm_atoms]
+            spec = str(solute.get("atoms", "") or "").strip()
+            atoms = (_index_list(spec, natom, "[solute_com]") if spec
+                     else [int(i) for i in qm_atoms])
             selected = np.zeros(natom, dtype=np.int64)
             selected[sorted(set(atoms))] = 1
             selected[self._massless] = 0

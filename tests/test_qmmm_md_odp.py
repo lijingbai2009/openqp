@@ -191,21 +191,11 @@ def test_qmmm_md_odp_window_runs_and_feeds_wham(tmp_path):
     assert values["warning"] is None
     assert "sampled at 300 K" in values["rejected"]
 
-    # a continuation with a different bias is refused before any row is
-    # appended: one table holds samples of one Hamiltonian and bias
-    rows = np.load(table)["step"].copy()
-    (work / "window.oqp").write_text(DECK.replace(
-        "md(nstep=3,", "md(nstep=5,restart=true,").replace(
-        "center=0.2,", "center=0.3,"))
-    run = subprocess.run(
-        [sys.executable, "-m", "oqp.pyoqp", "--silent", "--nompi", "window.oqp"],
-        cwd=work, env=env, capture_output=True, text=True, check=False)
-    assert run.returncode != 0
-    assert "differs from this run in controls" in run.stdout + run.stderr
-    assert np.array_equal(np.load(table)["step"], rows)
-
-    # continue the window from its step-3 checkpoint to step 5: the table
-    # keeps the earlier rows and the continued rows carry the same records
+    # keep the step-3 checkpoint, then continue the window to step 5: the
+    # table keeps the earlier rows and the continued rows carry the same records
+    checkpoints = sorted(p for p in work.glob("*restart*.npz"))
+    assert checkpoints
+    saved = {p: p.read_bytes() for p in checkpoints}
     (work / "window.oqp").write_text(DECK.replace(
         "md(nstep=3,", "md(nstep=5,restart=true,"))
     run = subprocess.run(
@@ -225,6 +215,39 @@ def test_qmmm_md_odp_window_runs_and_feeds_wham(tmp_path):
     assert continued["xi"][:4] == values["xi"]
     assert continued["split"] < 1.0e-6
     assert continued["window"] == 2
+
+    # from the older step-3 checkpoint, a continuation with a different bias
+    # is refused before any output is truncated to step 3: the trajectory,
+    # log and table still hold steps 4 and 5
+    for path, data in saved.items():
+        path.write_bytes(data)
+    outputs = {p: p.read_bytes() for p in work.iterdir()
+               if p.is_file() and p not in saved
+               and (p.name.startswith("qmmm_") or p.suffix == ".npz")}
+    assert table in outputs and any(p.suffix == ".pdb" for p in outputs)
+    (work / "window.oqp").write_text(DECK.replace(
+        "md(nstep=3,", "md(nstep=5,restart=true,").replace(
+        "center=0.2,", "center=0.3,"))
+    run = subprocess.run(
+        [sys.executable, "-m", "oqp.pyoqp", "--silent", "--nompi", "window.oqp"],
+        cwd=work, env=env, capture_output=True, text=True, check=False)
+    assert run.returncode != 0
+    assert "differs from this run in controls" in run.stdout + run.stderr
+    for path, data in outputs.items():
+        assert path.read_bytes() == data, path.name
+
+
+def test_bias_atom_selections_are_validated():
+    from oqp.library.qmmm_md_bias import _index_list
+
+    assert _index_list("0-3,7 9:11", 20, "[solute_com]") == [
+        0, 1, 2, 3, 7, 9, 10, 11]
+    for spec, message in (("-1", "not a 0-based index"),
+                          ("3-1", "descends"),
+                          ("0-20", "outside 0..19"),
+                          ("a", "not a 0-based index")):
+        with pytest.raises(ValueError, match=message):
+            _index_list(spec, 20, "[solute_com]")
 
 
 def test_wham_refuses_tampered_qmmm_md_records(tmp_path):

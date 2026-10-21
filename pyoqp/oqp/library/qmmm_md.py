@@ -1112,6 +1112,12 @@ class QMMM_MD:
             step0 = int(start["step"])
             self.simulation_md.currentStep = step0
             context.setTime(float(start["time_ps"]) * unit.picoseconds)
+            # before any output is truncated to the checkpoint: a refused
+            # continuation must leave the trajectory, table and log intact
+            energy_npz = self._energy_npz_path()
+            if os.path.isfile(energy_npz):
+                with np.load(energy_npz) as data:
+                    self._check_resumed_bias(data, energy_npz)
 
         resumed = (self.restart and os.path.isfile(self.trajectory_file)
                    and self._resume_trajectory(step0))
@@ -1257,7 +1263,6 @@ class QMMM_MD:
         energy_npz = self._energy_npz_path()
         if os.path.isfile(energy_npz):
             with np.load(energy_npz) as data:
-                self._check_resumed_bias(data, energy_npz)
                 if all(key in data.files for key in self._traj_data):
                     mask = np.asarray(data["step"]) <= step0
                     for key in self._traj_data:
