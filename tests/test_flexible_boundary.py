@@ -732,7 +732,8 @@ print("CELL=" + json.dumps(out))
     marker = next(line for line in result.stdout.splitlines()
                   if line.startswith("CELL="))
     values = json.loads(marker.removeprefix("CELL="))
-    assert values["orthorhombic"] == pytest.approx([20.0, 22.0, 24.0], abs=1e-9)
+    assert max(abs(a - b) for a, b in
+               zip(values["orthorhombic"], (20.0, 22.0, 24.0))) < 1.0e-9
     assert "orthorhombic boxes only" in values["triclinic"]
     assert "center=solute selected no atoms" in values["empty_center"]
     assert "solvent residue" in values["empty_center"]
