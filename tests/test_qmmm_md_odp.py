@@ -323,3 +323,105 @@ def test_periodic_bias_refuses_a_triclinic_cell():
     triclinic[1, 0] = 0.5
     with pytest.raises(ValueError, match="requires an orthorhombic cell"):
         require_orthorhombic(triclinic, ["odp", "droplet"])
+
+
+PME_DECK = """\
+hf/sto-3g
+md(nstep=1,dt=0.5,ensemble=nvt,temperature=300,friction=5.0,seed=11,trajectory_interval=1,restart_interval=1)
+qmmm(pdb_file="PDB",forcefield_files="amber14-all.xml amber14/tip3p.xml",qm_atoms="244-246",cutoff=PME,ewald_tol=1e-06)
+solute_com(enabled=true,force_constant=1.0,atoms="244-246")
+odp(enabled=true,cv="distance(17,245); distance(9,245)",scale="1.0,1.0",reference_r="6.2,7.3",reference_p="5.4,5.5",center=0.3,k_parallel=0.05,k_perpendicular=0.01,window=4)
+geom="PDB"
+"""
+
+PME_READ = r"""
+import json, sys
+import numpy as np
+from openmm import app
+from oqp.library.odp import read_odp_series
+table, pdb_path = sys.argv[1], sys.argv[2]
+series = read_odp_series(table)
+data = np.load(table)
+pdb = app.PDBFile(pdb_path)
+xyz = np.array(pdb.positions.value_in_unit(pdb.positions.unit))*10/0.52917721090
+box = np.array([pdb.topology.getPeriodicBoxVectors()[i][i]._value
+                for i in range(3)])*10/0.52917721090
+kj = 2625.499639
+split = data["E_pot"] - data["E_unbiased"] - kj*(
+    data["odp_bias_hartree"] + data["solute_com_energy_hartree"])
+print("PME=" + json.dumps({
+    "xi": [float(v) for v in series["xi"]],
+    "cv": [[float(c) for c in row] for row in series["cv_raw"]],
+    "bias": [float(v) for v in series["bias_hartree"]],
+    "unbiased": [float(v) for v in data["E_unbiased"]],
+    "split": float(np.max(np.abs(split))),
+    "box": box.tolist(),
+    "xyz": xyz[[8, 16, 244]].tolist(),
+}))
+"""
+
+
+def test_periodic_qmmm_md_odp_uses_the_minimum_image(tmp_path):
+    """PME window: the ODP CVs pair the QM water with alanine atoms at their
+    minimum image.  Moving the whole (MM) dipeptide by one box vector is
+    the same periodic system: the recorded CVs, xi and bias are unchanged,
+    and the CVs are the minimum-image distances, not the raw ones."""
+    pytest.importorskip("openmm")
+    from openmm import app, unit
+
+    pdb = app.PDBFile(str(EXAMPLES / "ala_box.pdb"))
+    shifted = pdb.positions.value_in_unit(unit.nanometer)
+    shifted = [((p[0] + 1.6, p[1], p[2]) if i < 19 else tuple(p))
+               for i, p in enumerate(shifted)]
+    results = {}
+    for name, positions in (("ala_box.pdb", None), ("ala_shifted.pdb", shifted)):
+        work = tmp_path / name.split(".")[0]
+        work.mkdir()
+        if positions is None:
+            shutil.copy(EXAMPLES / name, work / name)
+        else:
+            with open(work / name, "w") as stream:
+                app.PDBFile.writeFile(pdb.topology, positions*unit.nanometer,
+                                      stream)
+        (work / "window.oqp").write_text(PME_DECK.replace("PDB", name))
+        env = child_env()
+        env["OMP_NUM_THREADS"] = "2"
+        run = subprocess.run(
+            [sys.executable, "-m", "oqp.pyoqp", "--silent", "--nompi",
+             "window.oqp"], cwd=work, env=env, capture_output=True, text=True,
+            check=False)
+        if run.returncode != 0:
+            if "cannot load" in run.stderr or "No module named" in run.stderr:
+                pytest.skip("compiled OpenQP runtime is not available")
+            pytest.fail(run.stdout[-4000:] + run.stderr[-4000:])
+        table = next(p for p in work.glob("*.npz") if "restart" not in p.name)
+        read = subprocess.run(
+            [sys.executable, "-c", PME_READ, str(table), str(work / name)],
+            cwd=work, env=child_env(), capture_output=True, text=True,
+            check=False)
+        if read.returncode != 0:
+            pytest.fail(read.stdout + read.stderr)
+        marker = next(l for l in read.stdout.splitlines() if l.startswith("PME="))
+        results[name] = json.loads(marker.removeprefix("PME="))
+    plain, moved = results["ala_box.pdb"], results["ala_shifted.pdb"]
+    # the propagated potential is the QM/MM energy plus the bias terms
+    assert plain["split"] < 1.0e-6 and moved["split"] < 1.0e-6
+    # step 0: the CVs are the minimum-image distances of the input geometry
+    box = np.array(moved["box"])
+    xyz = np.array(moved["xyz"])
+    raw = [np.linalg.norm(xyz[2] - xyz[1]), np.linalg.norm(xyz[2] - xyz[0])]
+    image = []
+    for a in (1, 0):
+        d = xyz[2] - xyz[a]
+        d -= box*np.round(d/box)
+        image.append(np.linalg.norm(d))
+    assert min(raw) > 0.5*box[0]
+    assert np.allclose(moved["cv"][0], image, rtol=0.0, atol=1.0e-6)
+    # and the moved dipeptide gives the same window record as the original.
+    # The OpenMM context stores positions in single precision, so the moved
+    # coordinates differ by ~1e-7 bohr (observed on zeus: CVs 6e-8 and 9e-8 bohr,
+    # bias 5e-10 Hartree, QM/MM energy 5e-5 kJ/mol)
+    assert np.allclose(moved["cv"][0], plain["cv"][0], rtol=0.0, atol=1.0e-6)
+    assert abs(moved["xi"][0] - plain["xi"][0]) < 1.0e-6
+    assert abs(moved["bias"][0] - plain["bias"][0]) < 1.0e-8
+    assert abs(moved["unbiased"][0] - plain["unbiased"][0]) < 1.0e-3
