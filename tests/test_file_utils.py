@@ -530,6 +530,28 @@ class TestMECPStatusTable(unittest.TestCase):
         self.assertIn("PyOQP objective shift:", text)
         self.assertNotIn("PyOQP energy shift:", text)
 
+    def test_convergence_block_without_the_energies_is_an_error(self):
+        # record() sets both before check_convergence logs; a caller that
+        # skips it must fail rather than print nan
+        from tempfile import TemporaryDirectory
+
+        file_utils = load_file_utils()
+        metrics = {
+            "istate": 1, "jstate": 1, "nstate": 5, "mecp_search": "sqp",
+            "objective": -78.5, "de": -0.1, "energy_shift": 1.0e-6,
+            "gap": 0.002, "energy_gap": 1.0e-5,
+            "rmsd_step": 0.03, "target_rmsd_step": 1.0e-3,
+            "max_step": 0.08, "target_max_step": 2.0e-3,
+            "rmsd_grad": 0.3, "target_rmsd_grad": 1.0e-4,
+            "max_grad": 0.7, "target_max_grad": 3.0e-4,
+        }
+        with TemporaryDirectory() as folder:
+            mol = minimal_log_mol(Path(folder) / "mecp.log")
+            mol.config["optimize"] = {"imult": 1, "jmult": 3}
+            with self.assertRaisesRegex(KeyError, "energy"):
+                file_utils.dump_log(mol, title="Geometry Optimization Convergence 1",
+                                    section="mecp", info=metrics)
+
 
 if __name__ == "__main__":
     unittest.main()

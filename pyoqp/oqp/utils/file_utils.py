@@ -705,8 +705,8 @@ def dump_log(mol, title=None, section=None, info=None, must_print=False):
 """ % (
             state_i, state_j,
             info['mecp_search'],
-            info.get('energy', float('nan')),
-            info.get('objective', float('nan')),
+            info['energy'],
+            info['objective'],
             info['de'], info['energy_shift'], format_value(np.abs(info['de']) <= info['energy_shift']),
             info['gap'], info['energy_gap'], format_value(np.abs(info['gap']) <= info['energy_gap']),
             info['rmsd_step'], info['target_rmsd_step'], format_value(info['rmsd_step'] <= info['target_rmsd_step']),
