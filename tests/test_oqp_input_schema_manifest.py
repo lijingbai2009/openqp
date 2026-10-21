@@ -235,6 +235,15 @@ def test_all_generic_schema_keys_survive_parse_render_reparse_and_lower():
     # [qmmm] active_atoms, frozen_atoms, active_radius and active_from_pdb;
     # 368 with the ACID cube grid controls [properties] acid_spacing and
     # acid_padding.
+    # The spin-orbit step of a properties/data run adds [properties] soc and
+    # the per-manifold gradient selectors grad_s and grad_t; each must be in
+    # the manifest, and without them the count is the one below.
+    soc_keys = {("properties", "soc"), ("properties", "grad_s"),
+                ("properties", "grad_t")}
+    for key in soc_keys:
+        assert key in checked
+    assert len(checked) == 386
+    checked = [key for key in checked if key not in soc_keys]
     # 369 with the DKH decoupling-basis control [scf] scal_rel_decontract;
     # 370 with the MP2 energy transformation selector [mp2] transform;
     # 371 with the MRSF energy spin-pair cache switch [tdhf] pair_cache;
