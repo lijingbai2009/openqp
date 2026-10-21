@@ -195,6 +195,47 @@ def _raise_unavailable_wavefunction_method(method):
     raise ValueError(f'Unknown method type {method}')
 
 
+#: Per-ladder previous-step records: (record in a checkpoint) -> (``_old`` tag).
+_LADDER_HISTORY_TAGS = tuple(
+    (tag, f'{tag}_old') for tag in (
+        'OQP::td_bvec_mo_s', 'OQP::td_singlet_energies',
+        'OQP::td_bvec_mo_t', 'OQP::td_triplet_energies',
+        'OQP::state_tracking_lineage_s', 'OQP::state_tracking_phase_initial_s',
+        'OQP::state_tracking_lineage_t', 'OQP::state_tracking_phase_initial_t',
+    )
+)
+
+
+def _carry_ladder_history(data, previous_data):
+    """Install the per-ladder records of ``previous_data`` as ``*_old`` tags.
+
+    Every per-ladder ``*_old`` tag is invalidated first.  A Molecule is reused
+    across steps (MD, scripted drivers), so a previous step that carries no
+    record for a ladder -- a single-ladder or older checkpoint -- must leave
+    that ladder WITHOUT history; keeping the record of an earlier two-ladder
+    step would let NACME.load_state_history align and couple against the
+    wrong geometry instead of taking its no-history fallback.  Amplitudes and
+    energies of a ladder are installed only as a pair.
+    """
+    for _, old in _LADDER_HISTORY_TAGS:
+        try:
+            data[old]
+        except (AttributeError, KeyError):
+            continue
+        del data[old]
+    records = dict(_LADDER_HISTORY_TAGS)
+    for amplitude, ladder in (('OQP::td_bvec_mo_s', 'OQP::td_singlet_energies'),
+                              ('OQP::td_bvec_mo_t', 'OQP::td_triplet_energies')):
+        if amplitude in previous_data and ladder in previous_data:
+            data[records[amplitude]] = previous_data[amplitude]
+            data[records[ladder]] = previous_data[ladder]
+    for spin in ('s', 't'):
+        for record in ('OQP::state_tracking_lineage', 'OQP::state_tracking_phase_initial'):
+            tag = f'{record}_{spin}'
+            if tag in previous_data:
+                data[records[tag]] = previous_data[tag]
+
+
 def _single_ladder_child(config):
     """Drop the two-ladder selectors from a finite-difference child job config.
 
@@ -3197,25 +3238,10 @@ class BasisOverlap(Calculator):
         # configured one, which the drivers solve last), and coupling a
         # manifold against the other one's amplitudes is not a derivative
         # coupling.
-        for amplitude, ladder in (('OQP::td_bvec_mo_s', 'OQP::td_singlet_energies'),
-                                  ('OQP::td_bvec_mo_t', 'OQP::td_triplet_energies')):
-            try:
-                self.mol.data[f'{amplitude}_old'] = previous_data[amplitude]
-                self.mol.data[f'{ladder}_old'] = previous_data[ladder]
-            except (AttributeError, KeyError):
-                pass
+        _carry_ladder_history(self.mol.data, previous_data)
         # A new previous-step record: NACME.load_state_history keeps its own
         # pristine copy of it once per step.
         self.mol._unlabelled_state_history = None
-        # ... and the per-manifold state-tracking record (lineage and phase),
-        # for the same reason: the unlabelled one belongs to one ladder only.
-        for spin in ('s', 't'):
-            for record in ('OQP::state_tracking_lineage',
-                           'OQP::state_tracking_phase_initial'):
-                try:
-                    self.mol.data[f'{record}_{spin}_old'] = previous_data[f'{record}_{spin}']
-                except (AttributeError, KeyError):
-                    pass
         try:
             self.mol.data["OQP::state_tracking_lineage_old"] = previous_data[
                 "OQP::state_tracking_lineage"

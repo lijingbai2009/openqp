@@ -1185,6 +1185,55 @@ class StateHistoryPerLadderTests(unittest.TestCase):
         self.assertEqual(np.asarray(nacme.mol.data['OQP::td_bvec_mo_old']).shape, (6, 3))
         self.assertIsNone(nacme._history_label)
 
+    def test_a_reused_molecule_drops_ladder_history_its_new_step_lacks(self):
+        """One OQPData across three steps: a two-ladder checkpoint, then one
+        carrying only the singlet record, then a single-ladder checkpoint with
+        no labelled record.  A ladder the new step lacks has no history; the
+        stale arrays of the earlier step are never used."""
+        from oqp.library.single_point import NACME, _carry_ladder_history
+        from oqp.molecule.oqpdata import OQPData
+
+        data = OQPData()
+        data['OQP::td_energies'] = np.array([0.5, 0.6, 0.7])
+        data['OQP::td_bvec_mo'] = np.zeros((4, 3))
+        two_ladder = {
+            'OQP::td_bvec_mo_s': np.full((4, 2), 1.0),
+            'OQP::td_singlet_energies': np.array([0.1, 0.2]),
+            'OQP::td_bvec_mo_t': np.full((4, 3), 2.0),
+            'OQP::td_triplet_energies': np.array([0.3, 0.4, 0.5]),
+            'OQP::state_tracking_lineage_s': np.array([1, 0], dtype=np.int32),
+            'OQP::state_tracking_phase_initial_s': np.array([1.0, -1.0]),
+            'OQP::state_tracking_lineage_t': np.array([2, 0, 1], dtype=np.int32),
+            'OQP::state_tracking_phase_initial_t': np.array([-1.0, 1.0, 1.0]),
+        }
+        _carry_ladder_history(data, two_ladder)
+        np.testing.assert_array_equal(data['OQP::td_bvec_mo_t_old'], np.full((4, 3), 2.0))
+
+        singlet_only = {
+            'OQP::td_bvec_mo_s': np.full((4, 2), 5.0),
+            'OQP::td_singlet_energies': np.array([0.15, 0.25]),
+        }
+        _carry_ladder_history(data, singlet_only)
+        np.testing.assert_array_equal(data['OQP::td_bvec_mo_s_old'], np.full((4, 2), 5.0))
+        for stale in ('OQP::td_bvec_mo_t_old', 'OQP::td_triplet_energies_old',
+                      'OQP::state_tracking_lineage_s_old',
+                      'OQP::state_tracking_lineage_t_old',
+                      'OQP::state_tracking_phase_initial_t_old'):
+            with self.assertRaises(AttributeError, msg=stale):
+                data[stale]
+
+        _carry_ladder_history(data, {})
+        # the unlabelled previous step of the new payload
+        data['OQP::td_bvec_mo_old'] = np.full((4, 3), 9.0)
+        data['OQP::td_energies_old'] = np.array([0.55, 0.65, 0.75])
+        mol = _HistoryMol(data)
+        for label in ('s', 't'):
+            nacme = NACME.__new__(NACME)
+            nacme.mol = mol
+            self.assertFalse(nacme.load_state_history(label), label)
+            np.testing.assert_array_equal(data['OQP::td_bvec_mo_old'],
+                                          np.full((4, 3), 9.0))
+
     def test_a_ladder_without_history_is_not_aligned_to_the_other_one(self):
         """The other ladder installed its history first (the drivers solve it
         first); this ladder has no labelled record, so it falls back to the
