@@ -298,8 +298,12 @@ def test_window_identity_binds_the_mm_hamiltonian(tmp_path):
     shutil.copy(EXAMPLES / "formaldehyde.xml", local)
     base = mm_hamiltonian_identity([str(local), "tip5p.xml"], options)
     # a force field shipped with OpenMM is found and hashed by content
-    assert base["forcefield_files"][1][0] == "tip5p.xml"
-    assert len(base["forcefield_files"][1][1]) == 64
+    assert len(base["forcefield_files"]) == 2
+    assert len(base["forcefield_files"][1]) == 64
+    # a renamed copy of a force-field file is the same force field
+    renamed = tmp_path / "renamed.xml"
+    shutil.copy(local, renamed)
+    assert mm_hamiltonian_identity([str(renamed), "tip5p.xml"], options) == base
     assert mm_hamiltonian_identity([str(local), "tip5p.xml"], options) == base
     # the same file name with other contents is another Hamiltonian
     local.write_text(local.read_text().replace("</ForceField>",
@@ -321,7 +325,7 @@ def test_window_identity_binds_the_mm_hamiltonian(tmp_path):
     child.write_text("<ForceField>\n</ForceField>\n")
     parent.write_text('<ForceField>\n <Include file="part.xml"/>\n</ForceField>\n')
     first = mm_hamiltonian_identity([str(parent)], options)
-    assert [f[0] for f in first["forcefield_files"]] == ["aggregate.xml", "part.xml"]
+    assert len(first["forcefield_files"]) == 2
     child.write_text("<ForceField>\n<!-- edited -->\n</ForceField>\n")
     assert mm_hamiltonian_identity([str(parent)], options) != first
 
