@@ -176,6 +176,24 @@ OQP_CONFIG_SCHEMA = {
         'force_constant': {'type': float, 'default': '5.0'},
         'atoms': {'type': str, 'default': ''},
     },
+    # FlexiBLE QM/MM boundary (Shen and Glover, J. Chem. Phys. 155, 224112
+    # (2021)) between QM and MM solvent molecules of one residue kind.  alpha
+    # is per angstrom, point is angstrom, atoms are 0-based; see
+    # oqp/library/flexible_boundary.py.
+    'flexible': {
+        'enabled': {'type': bool, 'default': 'False'},
+        'alpha': {'type': float, 'default': '0.0'},
+        'temperature': {'type': float, 'default': '0.0'},
+        'center': {'type': string, 'default': 'solute'},
+        'atoms': {'type': str, 'default': ''},
+        'point': {'type': farray, 'default': '0.0,0.0,0.0'},
+        'anchor': {'type': str, 'default': 'O'},
+        'resnames': {'type': sarray, 'default': 'hoh,wat,sol,tip3,tip3p'},
+        'threshold': {'type': float, 'default': '0.01'},
+        'scale': {'type': float, 'default': '0.1'},
+        'max_iterations': {'type': int, 'default': '20'},
+        'keep_below_threshold': {'type': bool, 'default': 'False'},
+    },
     'input': {
         'charge': {'type': int, 'default': '0'},
         'basis': {'type': string, 'default': '6-31g*'},
@@ -620,8 +638,13 @@ OQP_CONFIG_SCHEMA = {
     'pt2': {
         'variant': {'type': string, 'default': 'auto'},
         'reference': {'type': string, 'default': 'casscf'},
-        'h0': {'type': string, 'default': 'fock'},
-        'contraction': {'type': string, 'default': 'uncontracted'},
+        # Blank means "the method's own": caspt2/MRMP2 -> fock + uncontracted,
+        # nevpt2 -> dyall + uncontracted, sc-nevpt2 -> dyall + strong
+        # (PT2_METHOD_IMPLIED in oqp.utils.input_checker).  A concrete default
+        # here is indistinguishable from a user value, so `method=nevpt2`
+        # without `h0` was read as an explicit `h0=fock` and refused.
+        'h0': {'type': string, 'default': ''},
+        'contraction': {'type': string, 'default': ''},
         'frozen': {'type': string, 'default': 'auto'},
         'multistate': {'type': string, 'default': 'auto'},
         'xms': {'type': bool, 'default': 'False'},
@@ -674,7 +697,17 @@ OQP_CONFIG_SCHEMA = {
         'acid_padding': {'type': float, 'default': '5.0'},
         'td_prop': {'type': bool, 'default': 'False'},
         'grad': {'type': iarray, 'default': '0'},
+        # Per-manifold gradient selectors, read only by a spin-orbit run.  A
+        # plain 'grad' index cannot say which spin ladder it means once a run
+        # solves two, so the manifold is named by the key.
+        'grad_s': {'type': iarray, 'default': ''},
+        'grad_t': {'type': iarray, 'default': ''},
         'nac': {'type': str, 'default': ''},
+        # Spin-orbit coupling as a step of a properties/data run.  Consumed by
+        # the Python driver only (like tdhf nstate_s/nstate_t), so it never
+        # reaches the native control block; runtype=soc remains the standalone
+        # SOC entry point and [md] soc the one inside surface hopping.
+        'soc': {'type': bool, 'default': 'False'},
         'export': {'type': bool, 'default': 'False'},
         'title': {'type': str, 'default': ''},
         'back_door': {'type': bool, 'default': False}
@@ -1284,7 +1317,8 @@ class OQPData:
         if data_size == -3:
             raise ValueError(
                 f"Cannot store OQP data tag `{key}`: tagarray refused to create "
-                "the record (invalid tag or record conflict)")
+                "the record (invalid tag, invalid dimensions or record "
+                "conflict)")
         if data_size < 0:
             raise MemoryError(
                 f"Cannot allocate OQP data tag `{key}` with shape {shape} "

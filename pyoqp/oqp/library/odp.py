@@ -165,14 +165,81 @@ class ODPUmbrella:
                 f"[odp] CV atom {largest} is outside the {natom}-atom MD system"
             )
 
-    def evaluate(self, coordinates):
-        """Return native bias energy, force, CVs, and projection diagnostics."""
+    def periodic_cv_frame(self, coordinates, box):
+        """Coordinates in which every CV takes its own minimum-image value.
+
+        Each CV is measured through its own atom pairs (distance: i-j;
+        asymmetric distance: i-j and k-l; angle: both arms from the vertex),
+        and in a periodic cell each pair has its own minimum image.  Imaging
+        all CV atoms into one shared Cartesian embedding fails whenever CV
+        pairs form a ring that winds around the cell, although every CV is
+        unambiguous.  Instead every CV gets private copies of its atoms: the
+        first atom of each pair stays in place and its partner is moved by a
+        lattice vector to the minimum image (an angle is placed about its
+        vertex).  Returns ``(xyz, cv_atoms, owner)``: the copy coordinates,
+        the CV atom table indexing them, and the original atom of each copy.
+        A lattice translation does not change a force, so the force on an
+        original atom is the sum of the forces on its copies.  A pair whose
+        separation is exactly half the box length along an axis has two
+        minimum images and is refused.
+        """
+        source = np.asarray(coordinates, dtype=np.float64)
+        box = np.asarray(box, dtype=np.float64).reshape(-1)
+        if box.size != 3 or not np.all(np.isfinite(box)) or np.any(box <= 0.0):
+            raise ValueError("[odp] periodic box lengths must be three positive values")
+        rows = []
+        owner = []
+        table = np.full_like(self.cv_atoms, -1)
+
+        def copy(atom, position):
+            rows.append(position)
+            owner.append(int(atom))
+            return len(rows) - 1
+
+        def partner(first, first_row, atom):
+            shift = source[atom] - source[first]
+            image = shift - box*np.round(shift/box)
+            if np.any(np.abs(image) >= 0.5*box):
+                axis = int(np.argmax(np.abs(image)/box))
+                raise RuntimeError(
+                    f"[odp] CV atoms {first + 1} and {atom + 1} are exactly half "
+                    f"the box length apart along axis {'xyz'[axis]} "
+                    f"({0.5*box[axis]:.6g} bohr); the minimum image of the CV "
+                    "is ambiguous.")
+            return copy(atom, rows[first_row] + image)
+
+        for index, (cv_type, atoms) in enumerate(zip(self.cv_types, self.cv_atoms)):
+            atoms = [int(atom) for atom in atoms]
+            if cv_type == 3:                          # angle(i,j,k), vertex j
+                vertex = copy(atoms[1], source[atoms[1]])
+                table[index, :3] = (partner(atoms[1], vertex, atoms[0]), vertex,
+                                    partner(atoms[1], vertex, atoms[2]))
+            else:                                     # distance or r(i,j) - r(k,l)
+                for start in range(0, 2 if cv_type == 1 else 4, 2):
+                    first = copy(atoms[start], source[atoms[start]])
+                    table[index, start:start + 2] = (
+                        first, partner(atoms[start], first, atoms[start + 1]))
+        return (np.ascontiguousarray(rows, dtype=np.float64),
+                np.ascontiguousarray(table, dtype=np.int64),
+                np.asarray(owner, dtype=np.int64))
+
+    def evaluate(self, coordinates, box=None):
+        """Return native bias energy, force, CVs, and projection diagnostics.
+
+        ``box`` gives orthorhombic periodic box lengths in the units of
+        ``coordinates`` (bohr); ``None`` means a nonperiodic system.
+        """
         xyz = np.ascontiguousarray(coordinates, dtype=np.float64)
         if xyz.ndim != 2 or xyz.shape[1] != 3:
             raise ValueError("ODP coordinates must have shape (natom, 3)")
         self.validate_atom_count(len(xyz))
         if not np.all(np.isfinite(xyz)):
             raise RuntimeError("ODP refused non-finite MD coordinates")
+        natom = len(xyz)
+        cv_atoms = self.cv_atoms
+        owner = None
+        if box is not None:
+            xyz, cv_atoms, owner = self.periodic_cv_frame(xyz, box)
         energy = np.zeros(1, dtype=np.float64)
         force = np.zeros_like(xyz)
         xi = np.zeros(1, dtype=np.float64)
@@ -185,7 +252,7 @@ class ODPUmbrella:
         status = oqp.oqp_odp_umbrella_evaluate(
             len(xyz), self.ncv,
             oqp.ffi.cast("int *", self.cv_types.ctypes.data),
-            oqp.ffi.cast("int64_t *", self.cv_atoms.ctypes.data),
+            oqp.ffi.cast("int64_t *", cv_atoms.ctypes.data),
             oqp.ffi.cast("double *", self.scales.ctypes.data),
             oqp.ffi.cast("double *", self.reference_r.ctypes.data),
             oqp.ffi.cast("double *", self.reference_p.ctypes.data),
@@ -216,6 +283,10 @@ class ODPUmbrella:
                 f"native ODP evaluation failed ({status}: "
                 f"{meanings.get(status, 'unknown status')})"
             )
+        if owner is not None:
+            folded = np.zeros((natom, 3), dtype=np.float64)
+            np.add.at(folded, owner, force)
+            force = folded
         result = {
             "energy": float(energy[0]),
             "force": force,
