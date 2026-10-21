@@ -413,6 +413,7 @@ EXEMPT_FLAGS = {
     'guess.continue_geom': 'JSON-restart geometry-selection IO convenience',
     'symmetry.strict': 'validation guard (mismatch -> fatal error), not a capability',
     'scf.trh_ls': 'TRAH line-search numerical sub-knob',
+    'flexible.keep_below_threshold': 'numerical sub-knob of the FlexiBLE partition-sum truncation (an option of the authors\' reference kernel); compared with that plugin in tests/test_flexible_boundary.py',
     'properties.td_prop': 'unfinished placeholder; input checker warns to disable',
     'properties.export': 'writes already-computed data to text (pure IO toggle)',
     'properties.back_door': 'programmatic data-injection hook for external drivers',

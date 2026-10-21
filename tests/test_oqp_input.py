@@ -2758,7 +2758,7 @@ def test_odp_modifier_roundtrips_and_is_restricted_to_namd():
     reparsed = oqp_input.parse_canonical_oqp(rendered)
     assert oqp_input.lower_to_legacy(reparsed)["odp"] == legacy["odp"]
 
-    with pytest.raises(OQPInputError, match="requires the NVE namd"):
+    with pytest.raises(OQPInputError, match=r"requires the namd\(\.\.\.\) workflow"):
         oqp_input.parse_canonical_oqp(
             'dft/pbe0/def2-svp geom="h2o.xyz" energy '
             'odp(enabled=true,k_parallel=0.1)'

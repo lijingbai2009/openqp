@@ -94,6 +94,7 @@ Minimal nonadiabatic-dynamics demonstrations on formaldehyde (QM) solvated by
 | `ala-dipeptide_RHF-QMMM-OPT-linkatom.inp` | **QM/MM geometry optimisation** across the same covalent boundary (RHF/6-31G): minimises the embedded QM/MM energy over the QM atoms with the MM fixed (`[optimize] qmmm_radius=0`), 12 steps, writes the full-system PDB. |
 | `ala-dipeptide_RHF-QMMM-OPT-constraints.inp` | **QM/MM optimisation with held bonds**: as above, with the MM atoms within 3 Å of the QM region free to move (`[optimize] qmmm_radius=3.0`) and their X–H bond lengths held by `[qmmm] constraints=HBonds` (frozen distances in the native optimizer), 6 steps; writes the geometry to the file named by `[optimize] qmmm_output`. |
 | `ala-box_BHHLYP-MRSF-NAMD-QMMM-PME.inp` | The same boundary in a **periodic TIP3P box** (`cutoff=PME`, Ewald QM/MM electrostatics with the self-consistent QM-image term) exercising `ewald_tol`, `lj_switch`, `h_lj` and `mm_charge_width`. |
+| `ala-box_BHHLYP-MRSF-NAMD-QMMM-PME-FLEXIBLE-ODP.oqp` | The periodic box with water HOH 76 moved into the QM region, kept there by the FlexiBLE boundary (`flexible(...)`), sampled as one ODP umbrella window (`odp(...)`) in Langevin NVT: the setup for QM/MM free energies of solvent-involving reactions. |
 
 To exercise checkpoint loading, select the semantic examples in the regression
 runner. It gives the producer and continuation the same project directory and
@@ -111,6 +112,46 @@ parameters matter; QM electrostatics come from ESPF), `tip3p.xml` (water),
 named in `[input] system = file.pdb <indices>` is looked up relative to the
 working directory first and then next to the input file, like the `[qmmm]`
 auxiliary files, so every NAMD deck runs from any directory.
+
+### Solvent molecules in the QM region — `[flexible]`
+
+QM waters diffuse away from the solute and MM waters diffuse in. The FlexiBLE
+boundary potential of Shen and Glover (J. Chem. Phys. 155, 224112 (2021))
+holds the separation: each solvent molecule is placed by its anchor atom
+(`anchor=O`, or `com`) at its distance from a centre, and
+
+    V = -kT ln[ h(QM, MM) / sum over partitions h ],
+    h = exp(-sum_{i in QM, j in MM} g(r_i - r_j)),  g(R) = (aR)^3/(1 + aR) for R > 0
+
+so the actual partition costs nothing when every QM molecule is closer than
+every MM molecule. A whole residue named in `resnames` is a QM molecule when
+all its atoms are in `[qmmm] qm_atoms` and an MM molecule otherwise; a residue
+split between the regions is an error, and so is a massless anchor (a
+virtual site cannot carry the boundary force). `[flexible]` needs QM/MM and is
+refused in SOC-NAMD, whose propagators do not apply the conservative
+restraints. For a solute in water:
+
+```text
+flexible(enabled=true, alpha=5.0, temperature=300, center=solute, atoms="0-11", anchor=O)
+```
+
+`alpha` is per angstrom (the plugin's tests use 5.0, i.e. 50 nm^-1); a small
+alpha lets very many partitions contribute and the run stops with an error
+rather than enumerating them. `temperature` is the kT of the potential and is
+set explicitly. `center=solute` uses the centre of mass of `atoms` (0-based;
+by default the QM atoms that are not solvent; in a periodic cell made whole
+along the topology bonds), `center=point` the fixed
+`point` in angstrom, and `center=molecules` the centre of mass of all
+solvent molecules (non-periodic only). Periodic runs (`cutoff=PME`) use the
+minimum-image distance and stop when a QM solvent molecule is not closer than
+half the box (MM molecules farther out contribute nothing). The partition sum follows the authors' OpenMM reference kernel
+(`threshold`, `scale`, `max_iterations`, `keep_below_threshold`), except
+that a first sum of exactly one is re-evaluated at the lowered threshold
+instead of being accepted (the kernel's shortcut drops every partition below
+the initial threshold and can return zero boundary energy and force), and
+`tests/test_flexible_boundary.py` checks energies and forces against values
+computed with that plugin (`tests/data/flexible_boundary_plugin_reference.json`;
+the generator is kept in openqp-devkit).
 
 NAMD writes a trajectory log (`<project>.log`), not a regression `.json`, so
 these serve as runnable demonstrations rather than numeric regression tests. See

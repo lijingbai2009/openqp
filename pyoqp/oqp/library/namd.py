@@ -49,6 +49,7 @@ from oqp.library.ints_1e import ints_1e
 from oqp.library.single_point import SinglePoint, Gradient, LastStep, BasisOverlap, NACME, SCFnotConverged
 from oqp.library.nac_utils import canonical_state_overlap
 from oqp.library.odp import odp_from_config
+from oqp.library.flexible_boundary import FlexiBLEBoundary
 from oqp.utils.tb_backends import is_tb_method, make_tb_adapter, tb_section_name
 from oqp.utils.file_utils import dump_log
 
@@ -356,14 +357,6 @@ def _restart_manifest_path(log_path):
     return os.path.join(os.path.dirname(absolute), stem + '.namd.restart.oqp')
 
 
-def _validate_odp_boundary_conditions(odp, periodic):
-    """Reject periodic ODP until native CVs implement minimum images."""
-    if odp is not None and bool(periodic):
-        raise NotImplementedError(
-            "[odp] periodic QM/MM is unsupported because ODP CVs do not yet "
-            "apply the minimum-image convention; use qmmm.cutoff=NoCutoff")
-
-
 def _namd_trajectory_dtype(nstate, natom, ncv=0):
     """Fixed-width, appendable binary record used by ``*.namd.trj``."""
     matrix = (nstate, nstate)
@@ -470,7 +463,7 @@ def read_odp_wham_series(path):
     }
     independent_controls = restart_identity.get('independent_controls', {})
     conservative_restraints = {}
-    for name in ('droplet', 'solute_com'):
+    for name in ('droplet', 'solute_com', 'flexible'):
         control = independent_controls.get(name, {})
         conservative_restraints[name] = (
             control if bool(control.get('enabled', False))
@@ -982,11 +975,7 @@ class NAMD:
                     "rescale=auto or isotropic, or tighten the model." % model_issue)
         if soc_requested and self.odp is not None:
             raise NotImplementedError(
-                "[odp] currently supports same-spin NVE NAMD only"
-            )
-        if self.odp is not None and self.ensemble != 'nve':
-            raise NotImplementedError(
-                "[odp] currently supports same-spin NVE NAMD only"
+                "[odp] currently supports same-spin NAMD only"
             )
         if self.dt_adaptive and not soc_requested:
             raise NotImplementedError(
@@ -1011,12 +1000,16 @@ class NAMD:
         self._wham_system_identity = self._qm_wham_system_identity()
         self._init_independent_controls(cfg)
         if soc_requested and (self.droplet_enabled or self.solute_com_enabled
+                              or self.flexible_enabled
                               or self.thermostat != 'off'):
             raise NotImplementedError(
-                "droplet/solute_com/NVT controls currently support same-spin NAMD only"
+                "droplet/solute_com/flexible/NVT controls currently support "
+                "same-spin NAMD only"
             )
-        if (self.droplet_enabled or self.solute_com_enabled) and not self._as_bool(
-                cfg.get('input', {}).get('qmmm_flag', False)):
+        if (self.droplet_enabled or self.solute_com_enabled
+                or self.flexible_enabled) and not self._as_bool(
+                    cfg.get('input', {}).get('qmmm_flag', False)):
+            # all-QM: droplet/solute_com targets; [flexible] is refused here
             self._setup_gas_restraint_targets()
         self._rng_step = 0
         self._last_hop_random = np.nan
@@ -1218,8 +1211,134 @@ class NAMD:
         self._solute_com_energy = 0.0
         self._solute_com_displacement = 0.0
         self._solute_com_force = None
+        self._init_flexible_boundary(cfg.get('flexible', {}))
         self._conservative_restraint_energy = 0.0
         self._conservative_restraint_force = None
+
+    def _init_flexible_boundary(self, section):
+        """Parse [flexible]: the FlexiBLE QM/MM boundary for solvent molecules.
+
+        User lengths are angstrom; alpha is per angstrom.  The potential is
+        built in _setup_qmmm_restraint_targets once the topology is known.
+        """
+        self.flexible_enabled = self._as_bool(section.get('enabled', False))
+        self._flexible = None
+        self._flexible_energy = 0.0
+        if not self.flexible_enabled:
+            return
+        self.flexible_alpha_input = float(section.get('alpha', 0.0))
+        self.flexible_temperature = float(section.get('temperature', 0.0))
+        for name, value in (('alpha', self.flexible_alpha_input),
+                            ('temperature', self.flexible_temperature)):
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError(f"[flexible] {name} must be given and positive")
+        self.flexible_center = str(
+            section.get('center', 'solute')).strip().lower()
+        if self.flexible_center not in ('solute', 'point', 'molecules'):
+            raise ValueError("[flexible] center must be solute, point, or molecules")
+        self.flexible_point_angstrom = self._vector3(
+            section.get('point', (0.0, 0.0, 0.0)), '[flexible] point')
+        self.flexible_atoms_spec = str(section.get('atoms', '') or '').strip()
+        self.flexible_anchor = str(section.get('anchor', 'O') or 'O').strip()
+        names = section.get('resnames', ('hoh', 'wat', 'sol', 'tip3', 'tip3p'))
+        if isinstance(names, str):
+            names = names.replace(',', ' ').split()
+        self.flexible_resnames = tuple(
+            str(name).strip().lower() for name in names if str(name).strip())
+        self.flexible_threshold = float(section.get('threshold', 0.01))
+        self.flexible_scale = float(section.get('scale', 0.1))
+        self.flexible_max_iterations = int(section.get('max_iterations', 20))
+        self.flexible_keep_below = self._as_bool(
+            section.get('keep_below_threshold', False))
+
+    def _flexible_settings_record(self):
+        return {
+            'enabled': True,
+            'alpha_per_angstrom': self.flexible_alpha_input,
+            'temperature_kelvin': self.flexible_temperature,
+            'center': self.flexible_center,
+            'point_angstrom': self.flexible_point_angstrom.tolist(),
+            'atoms_zero_based': self.flexible_atoms_spec,
+            'anchor': self.flexible_anchor,
+            'resnames': list(self.flexible_resnames),
+            'threshold': self.flexible_threshold,
+            'scale': self.flexible_scale,
+            'max_iterations': self.flexible_max_iterations,
+            'keep_below_threshold': self.flexible_keep_below,
+            'qm_molecules': (0 if self._flexible is None
+                             else int(self._flexible.nqm)),
+            'mm_molecules': (0 if self._flexible is None
+                             else int(self._flexible.nmol - self._flexible.nqm)),
+        }
+
+    def _setup_flexible_boundary(self, topology, qm_atoms, masses):
+        """Split the solvent residues into QM and MM molecules and build V."""
+        qm = set(int(i) for i in qm_atoms)
+        qm_molecules, mm_molecules, anchors = [], [], set()
+        for residue in topology.residues():
+            if str(residue.name).strip().lower() not in self.flexible_resnames:
+                continue
+            atoms = [int(atom.index) for atom in residue.atoms()]
+            inside = [i in qm for i in atoms]
+            if any(inside) and not all(inside):
+                raise ValueError(
+                    f"[flexible] residue {residue.name}{residue.id} is split "
+                    "between the QM and MM regions")
+            if self.flexible_anchor.lower() == 'com':
+                anchors.add(None)
+            else:
+                names = [str(atom.name).strip().upper()
+                         for atom in residue.atoms()]
+                if names.count(self.flexible_anchor.upper()) != 1:
+                    raise ValueError(
+                        f"[flexible] residue {residue.name}{residue.id} has no "
+                        f"unique anchor atom {self.flexible_anchor!r}")
+                anchors.add(names.index(self.flexible_anchor.upper()))
+            (qm_molecules if all(inside) else mm_molecules).append(atoms)
+        if len(anchors) > 1:
+            raise ValueError(
+                "[flexible] the anchor atom is not at the same position in "
+                "every solvent residue")
+        if not qm_molecules or not mm_molecules:
+            raise ValueError(
+                "[flexible] needs QM and MM solvent molecules; found "
+                f"{len(qm_molecules)} QM and {len(mm_molecules)} MM residues "
+                f"named {', '.join(self.flexible_resnames)}")
+        if self.flexible_center == 'point':
+            center = ('point', self.flexible_point_angstrom*ANGSTROM_TO_BOHR)
+        elif self.flexible_center == 'molecules':
+            center = ('molecules', None)
+        else:
+            if self.flexible_atoms_spec:
+                atoms = _parse_int_list(self.flexible_atoms_spec)
+            else:
+                solvent = set(i for m in qm_molecules for i in m)
+                atoms = [i for i in sorted(qm) if i not in solvent]
+            if not len(atoms):
+                raise ValueError(
+                    "[flexible] center=solute selected no atoms: "
+                    + ("atoms is empty" if self.flexible_atoms_spec else
+                       "every QM atom belongs to a solvent residue; give the "
+                       "solute atoms in atoms=, or use center=point")
+                    + ".")
+            atoms = self._single_atom_groups(
+                len(masses), atoms, '[flexible]').nonzero()[0]
+            center = ('atoms', atoms)
+        self._flexible = FlexiBLEBoundary(
+            qm_molecules, mm_molecules, masses,
+            alpha=self.flexible_alpha_input/ANGSTROM_TO_BOHR,
+            temperature=self.flexible_temperature,
+            anchor=anchors.pop(), center=center,
+            threshold=self.flexible_threshold, scale=self.flexible_scale,
+            max_iterations=self.flexible_max_iterations,
+            keep_below_threshold=self.flexible_keep_below,
+            bonds=[(int(bond[0].index), int(bond[1].index))
+                   for bond in topology.bonds()])
+
+    def _restraint_box(self):
+        """Orthorhombic cell (bohr) for coordinate-based restraints; None
+        for a finite system."""
+        return None
 
     @staticmethod
     def _single_atom_groups(natom, atom_indices, label):
@@ -1234,6 +1353,10 @@ class NAMD:
         return groups
 
     def _setup_gas_restraint_targets(self):
+        if self.flexible_enabled:
+            raise ValueError(
+                "[flexible] separates QM and MM solvent molecules and "
+                "requires qmmm(...)")
         if self.droplet_enabled:
             if self.droplet_target == 'water_com':
                 raise ValueError(
@@ -1294,6 +1417,13 @@ class NAMD:
             selected = self._single_atom_groups(
                 self.natom_all, indices, '[solute_com]')
             self._solute_com_selected = (selected > 0).astype(np.int64)
+        if self.flexible_enabled:
+            if self.periodic and self.flexible_center == 'molecules':
+                raise ValueError(
+                    "[flexible] center=molecules is not defined in a periodic "
+                    "cell; use center=solute or center=point")
+            self._setup_flexible_boundary(
+                self.pdb.topology, self.qm_atoms, self.m_all)
 
     def _independent_settings_record(self):
         # Keep low-level trajectory/checkpoint helpers usable in focused tests
@@ -1311,7 +1441,7 @@ class NAMD:
                         self, 'thermostat_friction', 0.0),
                 },
             }
-        return {
+        record = {
             'droplet': {
                 'enabled': bool(self.droplet_enabled),
                 'center_angstrom': self.droplet_center_angstrom.tolist(),
@@ -1340,6 +1470,10 @@ class NAMD:
                 'friction_ps_inverse': self.thermostat_friction,
             },
         }
+        # present only when enabled, so earlier checkpoints keep their record
+        if getattr(self, 'flexible_enabled', False):
+            record['flexible'] = self._flexible_settings_record()
+        return record
 
     def _evaluate_conservative_restraints(self, coordinates, masses):
         coords = np.ascontiguousarray(coordinates, dtype=np.float64).reshape((-1, 3))
@@ -1416,8 +1550,17 @@ class NAMD:
             self._solute_com_displacement = float(displacement[0])
             self._solute_com_force = force.copy()
             total_force += force
+        self._flexible_energy = 0.0
+        if getattr(self, 'flexible_enabled', False):
+            if self._flexible is None:
+                raise RuntimeError("FlexiBLE boundary was not initialized")
+            energy, force = self._flexible.evaluate(
+                coords, box=self._restraint_box())
+            self._flexible_energy = float(energy)
+            total_force += force
         self._conservative_restraint_energy = (
-            self._droplet_energy + self._solute_com_energy)
+            self._droplet_energy + self._solute_com_energy
+            + self._flexible_energy)
         self._conservative_restraint_force = total_force
         return total_force, self._conservative_restraint_energy
 
@@ -1703,11 +1846,15 @@ class NAMD:
             return {'enabled': False}
         return self.odp.provenance()
 
+    def _odp_box(self):
+        """Orthorhombic box lengths (bohr) for ODP CVs; None when nonperiodic."""
+        return None
+
     def _evaluate_odp(self, coordinates):
         if self.odp is None:
             self._odp_last = None
             return None
-        self._odp_last = self.odp.evaluate(coordinates)
+        self._odp_last = self.odp.evaluate(coordinates, box=self._odp_box())
         return self._odp_last
 
     def _prepare_md_outputs_on_io_rank(self):
@@ -3826,6 +3973,8 @@ class NAMD:
             'solute_com_displacement': np.array([
                 getattr(self, '_solute_com_displacement', 0.0)],
                 dtype=np.float64),
+            'flexible_energy': np.array([
+                getattr(self, '_flexible_energy', 0.0)], dtype=np.float64),
             'thermostat_exchange': np.array([
                 getattr(self, '_thermostat_exchange', 0.0)], dtype=np.float64),
             'thermostat_exchange_cumulative': np.array([
@@ -4180,7 +4329,8 @@ class NAMD:
         for name, value in payload['independent_state'].items():
             setattr(self, f'_{name}', value)
         self._conservative_restraint_energy = (
-            self._droplet_energy + self._solute_com_energy)
+            self._droplet_energy + self._solute_com_energy
+            + getattr(self, '_flexible_energy', 0.0))
         if getattr(self, '_etot_prev', None) is None:
             self._etot_prev = self._nve_previous_energy
         if getattr(self, '_disc_energy_absorbed', None) is None:
@@ -4350,6 +4500,7 @@ class NAMD:
                     saved, 'solute_com_energy', minimum=0.0),
                 'solute_com_displacement': self._restart_float(
                     saved, 'solute_com_displacement', minimum=0.0),
+                'flexible_energy': self._restart_flexible_energy(saved),
                 'thermostat_exchange': self._restart_float(
                     saved, 'thermostat_exchange'),
                 'thermostat_exchange_cumulative': self._restart_float(
@@ -4390,6 +4541,17 @@ class NAMD:
             raise RuntimeError(
                 f'NAMD restart checkpoint has invalid {name} metadata')
         return int(value[0])
+
+    def _restart_flexible_energy(self, saved):
+        """FlexiBLE energy of the checkpoint step; checkpoints written before
+        [flexible] existed carry none and are valid only without it."""
+        if 'flexible_energy' in getattr(saved, 'files', ()):
+            return self._restart_float(saved, 'flexible_energy')
+        if getattr(self, 'flexible_enabled', False):
+            raise RuntimeError(
+                'NAMD restart checkpoint has no FlexiBLE energy although '
+                '[flexible] is enabled')
+        return 0.0
 
     @staticmethod
     def _restart_float(saved, name, *, minimum=None):
@@ -5162,6 +5324,7 @@ class NAMD:
                    f'drop_n={getattr(self, "_droplet_active_count", 0)}  '
                    f'drop_fmax={getattr(self, "_droplet_force_max", 0.0):.3e}Ha/bohr  '
                    f'E_com={getattr(self, "_solute_com_energy", 0.0):.8f}  '
+                   f'E_flex={getattr(self, "_flexible_energy", 0.0):.8f}  '
                    f'E_kin={ekin:.8f}  '
                    f'dQ_therm={getattr(self, "_thermostat_exchange", 0.0):+.3e}  '
                    f'Q_therm={getattr(self, "_thermostat_exchange_cumulative", 0.0):+.3e}  '
@@ -5278,7 +5441,6 @@ class NAMD_QMMM(NAMD):
         self.cutoff = _resolve_cutoff(str(q['cutoff']).strip())   # NoCutoff | PME | Ewald | ...
         from oqp.library.qmmm_driver import is_periodic_method
         self.periodic = is_periodic_method(self.cutoff)   # PME / Ewald / CutoffPeriodic
-        _validate_odp_boundary_conditions(self.odp, self.periodic)
         embedding = str(q['embedding']).strip()
         frontier_scheme = str(q.get('frontier_scheme', 'none')).strip()
         _et = q.get('ewald_tol', None)
@@ -5846,6 +6008,12 @@ class NAMD_QMMM(NAMD):
                 f"{z_expected}. Note '[input] system = file.pdb ...' indices are "
                 "1-based while [qmmm] qm_atoms are 0-based.")
 
+    def _odp_box(self):
+        """The periodic cell for ODP CVs on the full-system coordinates:
+        r_all is never wrapped, but the input may place a CV atom one cell
+        away from its partners, so each CV is taken at its minimum image."""
+        return self.driver._box_lengths_bohr()       # None for a cluster
+
     def _qm_positions_bohr(self):
         """(natom, 3) QM-centre coordinates (bohr): real QM atoms in topology
         order, then the hydrogen link atoms on their cut bonds."""
@@ -5979,6 +6147,10 @@ class NAMD_QMMM(NAMD):
         dump_log(mol, title="PyOQP: NAMD QM/MM SCF warm start from the previous step's orbitals",
                  section='')
         return True
+
+    def _restraint_box(self):
+        """The periodic cell of the PME/Ewald topology; None for a cluster."""
+        return self.driver._box_lengths_bohr()
 
     def _fold_link_charges(self, pchg):
         """(nqm,) MM-facing QM charges: each link atom's ESPF charge is added
@@ -6607,6 +6779,7 @@ class NAMD_QMMM(NAMD):
                    f'drop_n={getattr(self, "_droplet_active_count", 0)}  '
                    f'drop_fmax={getattr(self, "_droplet_force_max", 0.0):.3e}Ha/bohr  '
                    f'E_com={getattr(self, "_solute_com_energy", 0.0):.8f}  '
+                   f'E_flex={getattr(self, "_flexible_energy", 0.0):.8f}  '
                    f'E_kin={ekin:.8f}  '
                    f'dQ_therm={getattr(self, "_thermostat_exchange", 0.0):+.3e}  '
                    f'Q_therm={getattr(self, "_thermostat_exchange_cumulative", 0.0):+.3e}  '

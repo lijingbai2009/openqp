@@ -630,7 +630,7 @@ from oqp.pyoqp import Runner
 
 runner = Runner(
     project='native_ht_contract',
-    input_file='examples/ODP/H2CO_BHHLYP-MRSF-NAMD-ODP.inp',
+    input_file='examples/ODP/H2CO_BHHLYP-MRSF-NAMD-ODP.oqp',
     log=LOG_PATH, silent=1, usempi=False)
 mol = runner.mol
 n = 2
