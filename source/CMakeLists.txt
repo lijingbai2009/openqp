@@ -42,6 +42,7 @@ list(APPEND SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/../tests/fortran/mrsf_spin_square_selftest.F90"
   "${CMAKE_CURRENT_SOURCE_DIR}/../tests/fortran/davidson_orthogonalization_selftest.F90"
   "${CMAKE_CURRENT_SOURCE_DIR}/../tests/fortran/mp2_gradient_density_test.F90"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../tests/fortran/oqp_alloc_status_selftest.F90"
 )
 
 # Keep module data accesses inside liboqp. Windows DLL import libraries expose

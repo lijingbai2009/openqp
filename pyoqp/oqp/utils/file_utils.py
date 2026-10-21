@@ -825,11 +825,11 @@ def dump_log(mol, title=None, section=None, info=None, must_print=False):
                 mode_labels = [str(x) for x in candidate]
         if ir.size == len(info) and raman.size == len(info):
             if mode_labels:
-                loginfo += '   Mode  Symmetry     Frequency(cm-1)      IR(km/mol)        Raman(activity)\n'
+                loginfo += '   Mode  Symmetry     Frequency(cm-1)      IR(km/mol)      Raman(bohr^4/amu)\n'
                 for n, f in enumerate(info):
                     loginfo += f'   {n + 1:4d} {mode_labels[n]:>9s} {f:17.2f} {ir[n]:16.6f} {raman[n]:20.6f}\n'
             else:
-                loginfo += '   Mode       Frequency(cm-1)      IR(km/mol)        Raman(activity)\n'
+                loginfo += '   Mode       Frequency(cm-1)      IR(km/mol)      Raman(bohr^4/amu)\n'
                 for n, f in enumerate(info):
                     loginfo += f'   {n + 1:4d} {f:20.2f} {ir[n]:16.6f} {raman[n]:20.6f}\n'
         else:

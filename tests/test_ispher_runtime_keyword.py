@@ -68,8 +68,12 @@ def test_auto_spherical_basis_uses_all_supported_transforms():
     assert "integer, parameter :: BAS_MXANG = 6" in constants
     assert "integer, parameter :: NUM_SPH_BF(0:BAS_MXANG)  = [(2*i+1, i = 0, BAS_MXANG)]" in constants
     assert "c2s_build(l)" in cart2sph
-    assert "c2s_h = c2s_build(l)" in cart2sph
-    assert "c2s_i = c2s_build(l)" in cart2sph
+    # h and i are compile-time tables (a lazily built SAVE table raced on
+    # first use inside OpenMP integral loops; tests/test_cart2sph_thread_safety.py).
+    assert "real(dp), parameter :: C2S_H(21,11)" in cart2sph
+    assert "real(dp), parameter :: C2S_I(28,13)" in cart2sph
+    assert "b = C2S_H" in cart2sph
+    assert "b = C2S_I" in cart2sph
     assert "do l = 2, BAS_MXANG" in cart2sph
     assert "pure spherical transforms are implemented only through g shells" not in cart2sph
     assert "5: [(5, 0, 0)" in symmetry
