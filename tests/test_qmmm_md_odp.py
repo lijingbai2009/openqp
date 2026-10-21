@@ -191,6 +191,19 @@ def test_qmmm_md_odp_window_runs_and_feeds_wham(tmp_path):
     assert values["warning"] is None
     assert "sampled at 300 K" in values["rejected"]
 
+    # a continuation with a different bias is refused before any row is
+    # appended: one table holds samples of one Hamiltonian and bias
+    rows = np.load(table)["step"].copy()
+    (work / "window.oqp").write_text(DECK.replace(
+        "md(nstep=3,", "md(nstep=5,restart=true,").replace(
+        "center=0.2,", "center=0.3,"))
+    run = subprocess.run(
+        [sys.executable, "-m", "oqp.pyoqp", "--silent", "--nompi", "window.oqp"],
+        cwd=work, env=env, capture_output=True, text=True, check=False)
+    assert run.returncode != 0
+    assert "differs from this run in controls" in run.stdout + run.stderr
+    assert np.array_equal(np.load(table)["step"], rows)
+
     # continue the window from its step-3 checkpoint to step 5: the table
     # keeps the earlier rows and the continued rows carry the same records
     (work / "window.oqp").write_text(DECK.replace(
@@ -250,3 +263,40 @@ def test_wham_refuses_tampered_qmmm_md_records(tmp_path):
     np.savez(bad, **arrays)
     with pytest.raises(ValueError, match="bias energy records disagree"):
         read_qmmm_md_odp_series(bad)
+
+
+def test_window_identity_binds_the_mm_hamiltonian(tmp_path):
+    pytest.importorskip("openmm")
+    from oqp.library.qmmm_md_bias import mm_hamiltonian_identity
+
+    options = {"frontier_scheme": "none", "ewald_tol": None, "lj_switch": False,
+               "h_lj": False, "mm_charge_width": None}
+    local = tmp_path / "solute.xml"
+    shutil.copy(EXAMPLES / "formaldehyde.xml", local)
+    base = mm_hamiltonian_identity([str(local), "tip5p.xml"], options)
+    # a force field shipped with OpenMM is found and hashed by content
+    assert base["forcefield_files"][1][0] == "tip5p.xml"
+    assert len(base["forcefield_files"][1][1]) == 64
+    assert mm_hamiltonian_identity([str(local), "tip5p.xml"], options) == base
+    # the same file name with other contents is another Hamiltonian
+    local.write_text(local.read_text().replace("</ForceField>",
+                                               "<!-- edited -->\n</ForceField>"))
+    assert mm_hamiltonian_identity([str(local), "tip5p.xml"], options) != base
+    shutil.copy(EXAMPLES / "formaldehyde.xml", local)
+    for key, value in (("ewald_tol", 1.0e-6), ("lj_switch", True),
+                       ("h_lj", True), ("mm_charge_width", 0.7),
+                       ("frontier_scheme", "rcd")):
+        changed = dict(options, **{key: value})
+        assert mm_hamiltonian_identity([str(local), "tip5p.xml"], changed) != base
+    with pytest.raises(FileNotFoundError):
+        mm_hamiltonian_identity(["no-such-forcefield.xml"], options)
+
+
+def test_periodic_bias_refuses_a_triclinic_cell():
+    from oqp.library.qmmm_md_bias import require_orthorhombic
+
+    require_orthorhombic(np.diag([3.0, 3.1, 3.2]), ["odp"])
+    triclinic = np.diag([3.0, 3.1, 3.2])
+    triclinic[1, 0] = 0.5
+    with pytest.raises(ValueError, match="requires an orthorhombic cell"):
+        require_orthorhombic(triclinic, ["odp", "droplet"])

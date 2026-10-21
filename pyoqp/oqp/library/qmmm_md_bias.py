@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 
 import numpy as np
 
@@ -256,6 +257,42 @@ class QMMMMDBias:
         out["solute_com"] = (dict(self.solute_settings, enabled=True)
                              if self.solute_com else {"enabled": False})
         return out
+
+
+def require_orthorhombic(cell, names):
+    """Refuse a cell with off-diagonal lattice components: the CVs and the
+    restraints image each Cartesian axis on its own, which is the minimum
+    image only in a rectangular cell."""
+    cell = np.asarray(cell, dtype=np.float64).reshape(3, 3)
+    if np.any(np.abs(cell - np.diag(np.diag(cell))) > 1.0e-12):
+        raise ValueError(
+            "%s in periodic QM/MM MD requires an orthorhombic cell; this cell "
+            "has off-diagonal lattice components" % ", ".join(names))
+
+
+def _forcefield_path(name):
+    """The file OpenMM's ForceField loads for this name: a path, or a file
+    shipped in OpenMM's data directories."""
+    if os.path.isfile(name):
+        return name
+    from openmm.app import forcefield as openmm_forcefield
+    for directory in openmm_forcefield._getDataDirectories():
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate):
+            return candidate
+    raise FileNotFoundError(f"force field file {name!r} not found")
+
+
+def mm_hamiltonian_identity(forcefield_files, options):
+    """Content digests of the force-field files and the QM/MM Hamiltonian
+    options, so windows sampled with different potentials are not combined."""
+    files = []
+    for name in forcefield_files:
+        with open(_forcefield_path(str(name)), "rb") as stream:
+            files.append([os.path.basename(str(name)),
+                          hashlib.sha256(stream.read()).hexdigest()])
+    return {"forcefield_files": files,
+            "options": {k: options[k] for k in sorted(options)}}
 
 
 def topology_identity(topology, qm_atoms, electronic):

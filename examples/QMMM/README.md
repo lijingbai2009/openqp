@@ -282,3 +282,15 @@ frontier-charge conservation on the real AMBER-14 charges — in
 `tests/test_qmmm_frontier_openmm.py` (OpenMM-gated), and the pure redistribution
 math (including a finite-difference gradient check) in
 `tests/test_qmmm_frontier.py`.
+
+## ODP umbrella windows in ground-state QM/MM MD
+
+`H2CO-water_HF-QMMM-MD-ODP.oqp` runs one ODP umbrella window in ground-state
+QM/MM MD (`md(...) qmmm(...)`), with the `droplet` wall and the `solute_com`
+restraint, as in the original ODP paper (Baek and Choi, JCTC 14, 2312 (2018)).
+Each step of `total_energy.npz` holds the unbiased potential, every bias term
+and the ODP coordinate; `oqp.library.odp.odp_wham` (or `examples/ODP/odp_wham.py`)
+combines the tables of all windows. A restart (`md(restart=true)`) must keep
+the bias, the restraints, the QM/MM Hamiltonian and the temperature of the
+table it continues; periodic runs need an orthorhombic cell.
+

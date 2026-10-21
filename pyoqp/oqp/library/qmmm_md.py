@@ -12,7 +12,8 @@ from oqp.library.qmmm_active import (
     selection_requested)
 from oqp.library.qmmm_driver import OpenQpQMMM, read_xyz, is_periodic_method
 from oqp.library.qmmm_md_bias import (
-    QMMMMDBias, SERIES_FORMAT, requested_sections, topology_identity,
+    QMMMMDBias, SERIES_FORMAT, mm_hamiltonian_identity, requested_sections,
+    require_orthorhombic, topology_identity,
 )
 from oqp.utils.md_controls import (
     continuation_seed,
@@ -503,6 +504,7 @@ class QMMM_MD:
                 "'qmmm.forcefield_files' is required in the configuration."
             )
         self.forcefield = app.ForceField(*ff_files)
+        self._forcefield_files = list(ff_files)
 
         qm_atoms_raw = qmmm_cfg.get("qm_atoms")
         if qm_atoms_raw is None:
@@ -851,6 +853,11 @@ class QMMM_MD:
         self.oqp_driver._reuse_orbitals = False
         self.mm_systems = self.oqp_driver.mm_systems
         if self._bias_requested:
+            if is_periodic_method(self.cutoff):
+                vectors = self.pdb.topology.getPeriodicBoxVectors()
+                require_orthorhombic(
+                    [[v.value_in_unit(unit.nanometer) for v in vec]
+                     for vec in vectors], self._bias_requested)
             sys0 = self.mm_systems["sys0"]
             masses = np.array([
                 sys0.getParticleMass(i).value_in_unit(unit.dalton)
@@ -1250,6 +1257,7 @@ class QMMM_MD:
         energy_npz = self._energy_npz_path()
         if os.path.isfile(energy_npz):
             with np.load(energy_npz) as data:
+                self._check_resumed_bias(data, energy_npz)
                 if all(key in data.files for key in self._traj_data):
                     mask = np.asarray(data["step"]) <= step0
                     for key in self._traj_data:
@@ -1262,6 +1270,45 @@ class QMMM_MD:
                     unit.nanometer))
             self._sampled_step, self._sampled_xyz = step0, xyz
             self._force_xyz = xyz
+
+    def _bias_contract(self, metadata):
+        """The parts of the bias provenance that rows of one table share:
+        the sampled Hamiltonian, the bias and restraints, the ensemble and
+        its temperature (time step and friction may change on a restart)."""
+        return {
+            "format": metadata.get("format"),
+            "ensemble": metadata.get("ensemble"),
+            "temperature_kelvin": (metadata.get("thermostat") or {}).get(
+                "temperature_kelvin"),
+            "controls": metadata.get("controls"),
+            "system_identity": metadata.get("system_identity"),
+        }
+
+    def _check_resumed_bias(self, data, path):
+        """Refuse to continue a table whose earlier rows were sampled with a
+        different bias, restraint or Hamiltonian than this run."""
+        stored = None
+        if "bias_metadata_json" in data.files:
+            stored = json.loads(str(np.asarray(data["bias_metadata_json"])[0]))
+        if self.bias is None:
+            if stored is not None:
+                raise ValueError(
+                    "restart: %s was sampled with ODP/restraints, but this run "
+                    "requests none; start a new table" % path)
+            return
+        if stored is None:
+            raise ValueError(
+                "restart: %s has no bias provenance, but this run requests "
+                "%s; start a new table" % (path, ", ".join(self._bias_requested)))
+        old = self._bias_contract(stored)
+        new = json.loads(json.dumps(self._bias_contract(self._bias_metadata()),
+                                    sort_keys=True))
+        changed = sorted(k for k in new if old.get(k) != new[k])
+        if changed:
+            raise ValueError(
+                "restart: the bias provenance of %s differs from this run in %s; "
+                "a table must hold samples of one Hamiltonian and bias, so "
+                "start a new window instead" % (path, ", ".join(changed)))
 
     # ------------------------------------------------------------------
     #  Checkpoints and snapshots
@@ -1564,6 +1611,14 @@ class QMMM_MD:
             "scf_multiplicity": str(scf.get("multiplicity", "1")),
             "cutoff": str(self.cutoff),
             "embedding": str(self.embedding),
+            "mm_hamiltonian": mm_hamiltonian_identity(
+                self._forcefield_files, {
+                    "frontier_scheme": self.frontier_scheme,
+                    "ewald_tol": self.ewald_tol,
+                    "lj_switch": self.lj_switch,
+                    "h_lj": self.h_lj,
+                    "mm_charge_width": self.mm_charge_width,
+                }),
         }
         return {
             "format": SERIES_FORMAT,
