@@ -407,7 +407,10 @@ def tight_binding_identity(mol):
     if method not in ("dftb", "xtb"):
         return None
     view = types.SimpleNamespace(mol=mol)
-    for name in ("_effective_tight_binding_settings",
+    # every NAMD method the resolution calls on ``self`` (the configuration
+    # view first: QM/MM MD does not switch response manifolds, so it is
+    # the molecule's configuration as given)
+    for name in ("_signature_config", "_effective_tight_binding_settings",
                  "_resolved_tight_binding_artifacts", "_tight_binding_identity"):
         setattr(view, name, types.MethodType(getattr(NAMD, name), view))
     identity = view._tight_binding_identity()
