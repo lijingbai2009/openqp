@@ -306,10 +306,12 @@ def test_periodic_solute_centre_is_made_whole_through_its_bonds():
         fd = -(bonded.evaluate(plus, box=box)[0]
                - bonded.evaluate(minus, box=box)[0])/(2.0*h)
         assert abs(fd - force[atom, axis]) < 1.0e-9
-    # without the bonds the centre lands at the wrong image
+    # without the bonds the centre lands at the wrong image, the QM molecule
+    # moves out toward a face and the cell is refused
     unbonded = FlexiBLEBoundary([[3, 4, 5]], [[6, 7, 8], [9, 10, 11]],
                                 masses, **options)
-    assert abs(unbonded.evaluate(wrapped, box=box)[0] - reference) > 1.0e-8
+    with pytest.raises(RuntimeError, match="crosses the face"):
+        unbonded.evaluate(wrapped, box=box)
 
 
 def test_periodic_com_anchors_are_made_whole_through_their_bonds():
@@ -345,9 +347,46 @@ def test_periodic_com_anchors_are_made_whole_through_their_bonds():
         fd = -(bonded.evaluate(plus, box=box)[0]
                - bonded.evaluate(minus, box=box)[0])/(2.0*h)
         assert abs(fd - force[atom, axis]) < 1.0e-9
-    # imaged against their first atoms the anchors move by 10 bohr
+    # imaged against their first atoms the anchors move by 10 bohr, out
+    # toward a face, and the cell is refused
     unbonded = FlexiBLEBoundary(*molecules, masses, **options)
-    assert abs(unbonded.evaluate(wrapped, box=box)[0] - reference) > 1.0e-6
+    with pytest.raises(RuntimeError, match="crosses the face"):
+        unbonded.evaluate(wrapped, box=box)
+
+
+def test_mm_anchor_on_a_periodic_face_with_boundary_force_is_refused():
+    """Review case: QM anchor at the centre, MM anchor at x = L/2, alpha 0.1.
+
+    The exchanged partition keeps weight 0.92, so the MM anchor feels the
+    boundary.  Crossing the face flips its minimum-image radial direction
+    from +x to -x, so the force would jump from +F to -F; the cell is refused
+    wherever the MM molecule is.  With alpha 1 a molecule on the face lies
+    below the threshold, its force is exactly zero on both sides and the
+    same cell is accepted.
+    """
+    box = np.array([10.0, 10.0, 10.0])
+    kwargs = dict(anchor=0, center=("point", np.zeros(3)))
+    soft = FlexiBLEBoundary([[0]], [[1]], [1.0, 1.0], alpha=0.1,
+                            temperature=300.0, **kwargs)
+    for x in (3.0, 4.999, 5.0, 5.001):
+        xyz = np.array([[0.0, 0.0, 0.0], [x, 0.0, 0.0]])
+        _energy, force = soft.evaluate(xyz)
+        assert force[1, 0] > 1.0e-6
+        with pytest.raises(RuntimeError, match="crosses the face"):
+            soft.evaluate(xyz, box=box)
+    # the cell is accepted once it is large enough
+    xyz = np.array([[0.0, 0.0, 0.0], [4.9, 0.0, 0.0]])
+    open_cell = soft.evaluate(xyz)
+    periodic = soft.evaluate(xyz, box=10.0*box)
+    assert abs(periodic[0] - open_cell[0]) < 1.0e-18
+    assert np.max(np.abs(periodic[1] - open_cell[1])) < 1.0e-18
+
+    stiff = FlexiBLEBoundary([[0]], [[1]], [1.0, 1.0], alpha=1.0,
+                             temperature=300.0, **kwargs)
+    for x in (4.999, 5.001):
+        xyz = np.array([[0.0, 0.0, 0.0], [x, 0.0, 0.0]])
+        energy, force = stiff.evaluate(xyz, box=box)
+        assert energy == 0.0 and np.all(force == 0.0)
 
 
 def test_partition_explosion_is_refused_not_hidden():

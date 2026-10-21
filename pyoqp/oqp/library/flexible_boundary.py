@@ -40,6 +40,10 @@ import math
 
 import numpy as np
 
+#: Largest boundary force (Hartree/bohr) allowed on an anchor that can reach
+#: a periodic face of the minimum-image cell.
+PERIODIC_FACE_FORCE_TOLERANCE = 1.0e-12
+
 KB_HARTREE_PER_KELVIN = 3.166811563e-6
 ANGSTROM_TO_BOHR = 1.0 / 0.52917721092
 
@@ -316,6 +320,32 @@ class FlexiBLEBoundary:
                         stack.append(child)
         return total, derivative
 
+    def _check_periodic_faces(self, r, box, h, kt):
+        """Refuse a cell in which an MM anchor on a face feels the boundary.
+
+        The minimum-image radial direction of an anchor flips sign when it
+        crosses a face of the cell, at r >= L/2 for the shortest edge L.  An
+        MM molecule there lies on the QM side of a partition only together
+        with a QM molecule on the MM side, so that partition's weight is at
+        most w = exp(-g(L/2 - r_QM,max)), and its pair force at most
+        kT g'(L/2 - r_QM,max) w.  Unless the threshold drops such partitions
+        (w < h) or that force is negligible, the boundary force would jump
+        when an MM molecule crosses a face, so the evaluation is refused.
+        """
+        separation = 0.5*float(np.min(box)) - float(np.max(r[:self.nqm]))
+        g, dg = pair_term(self.alpha, separation)
+        weight = math.exp(-float(g))
+        if weight < h and not self.keep_below_threshold:
+            return
+        bound = kt*float(dg)*weight
+        if bound > PERIODIC_FACE_FORCE_TOLERANCE:
+            raise RuntimeError(
+                "FlexiBLE: an MM molecule on a periodic face would still feel "
+                "the boundary, so its force would jump when it crosses the "
+                f"face (partition weight {weight:.3e} >= threshold {h:.3e}, "
+                f"force up to {bound:.3e} Hartree/bohr); use a larger box or "
+                "a larger alpha")
+
     # ------------------------------------------------------------------
     # potential
     # ------------------------------------------------------------------
@@ -334,9 +364,9 @@ class FlexiBLEBoundary:
         vectors = self._image(anchors - center, box)
         r = np.linalg.norm(vectors, axis=1)
         if box is not None and float(np.max(r[:self.nqm])) >= 0.5*float(np.min(box)):
-            # An MM molecule beyond half the box only meets QM molecules at
-            # smaller distances, where g = 0; a QM molecule there would make
-            # the boundary itself reach a periodic image.
+            # A QM molecule there would make the boundary itself reach a
+            # periodic image.  MM molecules there are checked below: they are
+            # allowed only while their boundary force has decayed.
             far = int(np.argmax(r[:self.nqm]))
             raise RuntimeError(
                 "FlexiBLE: a QM molecule is not closer to the centre than "
@@ -382,6 +412,8 @@ class FlexiBLEBoundary:
         energy = -kt*math.log(numerator/denominator)
         dlog = d_numerator/numerator - d_denominator/denominator
         anchor_force = kt*dlog[:, None]*units
+        if box is not None:
+            self._check_periodic_faces(r, box, h, kt)
         force = np.zeros_like(xyz)
         for molecule, weights, f in zip(self.molecules, atom_weights,
                                         anchor_force):
