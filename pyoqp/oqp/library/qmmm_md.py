@@ -13,9 +13,9 @@ from oqp.library.qmmm_active import (
     selection_requested)
 from oqp.library.qmmm_driver import OpenQpQMMM, read_xyz, is_periodic_method
 from oqp.library.qmmm_md_bias import (
-    QMMMMDBias, SERIES_FORMAT, mm_hamiltonian_identity, qm_surface_identity,
-    requested_sections,
-    require_orthorhombic, topology_identity,
+    QMMMMDBias, SERIES_FORMAT, espf_environment_identity,
+    mm_hamiltonian_identity, qm_surface_identity, requested_sections,
+    require_orthorhombic, tight_binding_identity, topology_identity,
 )
 from oqp.utils.md_controls import (
     continuation_seed,
@@ -684,6 +684,18 @@ class QMMM_MD:
         # the QM settings as given, before any evaluation can update them:
         # the window identity and the restart check must see the same values
         self._qm_config_given = deepcopy(self._qm_config())
+        self._espf_identity = None
+        self._tight_binding_identity = None
+        if self._bias_requested:
+            self._espf_identity = espf_environment_identity()
+            method = str(self._qm_config_given.get("input", {}).get(
+                "method", "")).lower()
+            if method in ("dftb", "xtb") and mol is None:
+                raise ValueError(
+                    "QM/MM MD with %s needs the molecule to resolve its "
+                    "backend artifacts for the window identity" % method)
+            if mol is not None:
+                self._tight_binding_identity = tight_binding_identity(mol)
 
         # ------ internal state --------------------------------------------
         self.oqp_driver = None
@@ -1648,6 +1660,10 @@ class QMMM_MD:
             # basis definitions addressed by content
             "qm_surface": qm_surface_identity(
                 cfg, getattr(self.mol, "input_file", None)),
+            # ESPF environment controls and the content of DFTB/xTB backend
+            # artifacts, both fixed when the run is set up
+            "espf_environment": self._espf_identity,
+            "tight_binding": self._tight_binding_identity,
             # the sampled degrees of freedom: held atoms and constraints
             "propagation": {
                 "rigidwater": bool(self.rigidwater),

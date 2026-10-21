@@ -461,3 +461,44 @@ def test_qm_surface_identity_binds_every_surface_option(tmp_path):
     assert len(first["input"]["basis"]["sha256"]) == 64
     (tmp_path / "custom.basis").write_text("H 0\nS 1 1.0\n 2.0 1.0\n")
     assert qm_surface_identity(cfg, str(tmp_path / "window.oqp")) != first
+
+
+def test_window_identity_binds_espf_controls_and_tb_backend_contents(
+        tmp_path, monkeypatch):
+    import types
+
+    from oqp.library.qmmm_md_bias import (
+        espf_environment_identity, qm_surface_identity, tight_binding_identity)
+
+    for name in ("ESPF_ROHF", "ESPF_SWSCALE"):
+        monkeypatch.delenv(name, raising=False)
+    base = espf_environment_identity()
+    monkeypatch.setenv("ESPF_SWSCALE", "1.5")
+    assert espf_environment_identity()["switch_scale"] == 1.5
+    monkeypatch.setenv("ESPF_ROHF", "1")
+    assert espf_environment_identity() != base
+
+    params = tmp_path / "params"
+    params.mkdir()
+    (params / "H-H.skf").write_text("first\n")
+    executable = tmp_path / "probe"
+    executable.write_text("#!/bin/sh\n")
+    config = {"input": {"method": "dftb"},
+              "dftb": {"parameter_path": str(params), "backend": "probe",
+                       "executable": str(executable)}}
+    mol = types.SimpleNamespace(config=config,
+                                input_file=str(tmp_path / "window.oqp"),
+                                oqp_input_source=None)
+    first = tight_binding_identity(mol)
+    settings = first["settings"]
+    assert len(settings["parameter_path"]["sha256"]) == 64
+    assert len(settings["executable"]["sha256"]) == 64
+    # the same paths with other contents are another Hamiltonian
+    (params / "H-H.skf").write_text("second\n")
+    assert tight_binding_identity(mol) != first
+    # the path spellings themselves are not part of the surface identity
+    other = {"input": {"method": "dftb"},
+             "dftb": dict(config["dftb"], parameter_path="elsewhere")}
+    assert qm_surface_identity(other) == qm_surface_identity(config)
+    assert tight_binding_identity(types.SimpleNamespace(
+        config={"input": {"method": "hf"}})) is None

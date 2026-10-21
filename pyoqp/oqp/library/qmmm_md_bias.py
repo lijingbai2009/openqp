@@ -320,6 +320,12 @@ def qm_surface_identity(config, input_file=None):
     from oqp.library.namd import _electronic_config_identity
 
     identity = _electronic_config_identity(config)
+    method = str(identity.get("input", {}).get("method", "")).lower()
+    if isinstance(identity.get(method), dict):
+        # backend artifacts are content-addressed by tight_binding_identity;
+        # their path spellings would only make identical runs differ
+        for key in ("parameter_path", "library_path", "executable"):
+            identity[method].pop(key, None)
     directory = os.path.dirname(input_file) if input_file else ""
     for section, key in (("input", "basis"), ("scf", "init_basis")):
         value = identity.get(section, {}).get(key)
@@ -329,6 +335,33 @@ def qm_surface_identity(config, input_file=None):
                 "file": os.path.basename(path),
                 "sha256": _file_digest(path) if os.path.isfile(path) else None}
     return identity
+
+
+def espf_environment_identity():
+    """The ESPF_* environment controls that change electrostatic QM/MM
+    energies and forces, as the NAMD identity records them."""
+    from oqp.library.namd import NAMD
+
+    return NAMD._espf_environment_identity()
+
+
+def tight_binding_identity(mol):
+    """Content-addressed DFTB/xTB Hamiltonian (parameter directory, native
+    library or probe executable, resolved like the calculation resolves
+    them), through the NAMD implementation; None for other methods."""
+    import types
+
+    from oqp.library.namd import NAMD
+
+    config = getattr(mol, "config", None) or {}
+    method = str(config.get("input", {}).get("method", "")).lower()
+    if method not in ("dftb", "xtb"):
+        return None
+    view = types.SimpleNamespace(mol=mol)
+    for name in ("_effective_tight_binding_settings",
+                 "_resolved_tight_binding_artifacts", "_tight_binding_identity"):
+        setattr(view, name, types.MethodType(getattr(NAMD, name), view))
+    return view._tight_binding_identity()
 
 
 def topology_identity(topology, qm_atoms, electronic):
