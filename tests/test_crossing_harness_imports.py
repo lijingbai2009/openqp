@@ -36,10 +36,20 @@ def _harness_modules(tree):
     return provided
 
 
+def _is_source_module(name):
+    """True when ``name`` is a module file or package under pyoqp/."""
+    base = ROOT / "pyoqp" / Path(*name.split("."))
+    return base.with_suffix(".py").is_file() or (base / "__init__.py").is_file()
+
+
 def _module_level_oqp_imports(path):
     for node in ast.parse(path.read_text()).body:
         if isinstance(node, ast.ImportFrom) and node.module:
             names = [node.module]
+            # ``from oqp.utils import name`` imports the submodule
+            # oqp.utils.name when one exists; that needs providing too
+            names += [f"{node.module}.{alias.name}" for alias in node.names
+                      if _is_source_module(f"{node.module}.{alias.name}")]
         elif isinstance(node, ast.Import):
             names = [alias.name for alias in node.names]
         else:
@@ -63,6 +73,20 @@ class CrossingHarnessImportTest(unittest.TestCase):
                         f"{relative} imports {name} at module level; add it "
                         f"to SOURCE_MODULES (pure Python) or stub it in "
                         f"{HARNESS.name}")
+
+    def test_from_package_import_of_a_submodule_is_seen(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "target.py"
+            target.write_text(
+                "from oqp.utils import oqp_input, not_a_module\n"
+                "import numpy\n"
+                "try:\n    from oqp.utils import spin_states\n"
+                "except ModuleNotFoundError:\n    pass\n")
+            found = list(_module_level_oqp_imports(target))
+        # the package, its real submodule, nothing from the try block
+        self.assertEqual(found, ["oqp.utils", "oqp.utils.oqp_input"])
 
 
 if __name__ == "__main__":
