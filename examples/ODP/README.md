@@ -4,7 +4,7 @@
 and `H2CO_BHHLYP-MRSF-NAMD-ODP-NVT.oqp` the same window sampled canonically.
 For a production PMF, copy one into several windows, give each a unique
 `window` and `center` in `odp(...)`, and give each run its own packed
-`trajectory_file` in `namd(...)`.
+`trajectory_file` in `md(...)`.
 
 Analyze all windows with the public Python API example:
 
@@ -13,8 +13,8 @@ python odp_wham.py --temperature 300 --output odp-wham.npz window-*.namd.trj
 ```
 
 The supplied temperature is the canonical temperature assumed by WHAM. For a
-free-energy window run each window canonically, `namd(...,ensemble=nvt,
-thermostat=langevin)` as in `H2CO_BHHLYP-MRSF-NAMD-ODP-NVT.oqp`; WHAM then
+free-energy window run each window canonically, `md(...,ensemble=nvt)`
+(Langevin thermostat at `temperature`, default 300 K) as in `H2CO_BHHLYP-MRSF-NAMD-ODP-NVT.oqp`; WHAM then
 requires the supplied temperature to equal the recorded thermostat
 temperature. An NVE window is still accepted, but OpenQP records the ensemble
 and warns that WHAM assumes canonical sampling.
