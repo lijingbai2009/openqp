@@ -1121,9 +1121,12 @@ contains
       ! energies refreshed for supplied orbitals, are taken from the unshifted
       ! first build (fock_noshift) so no shifted virtual energy is published.
       !----------------------------------------------------------------------------
-      ! SOSCF and TRAH are held as DIIS is: their first conv%run returns the
-      ! SD result, so the iteration-1 test only rates the model guess.
-      cold_first_iter = (iter == 1) .and. (.not. supplied_valid)
+      ! SOSCF is held as DIIS is: its first conv%run returns the SD result, so
+      ! the iteration-1 test only rates the model guess. Native TRAH is not:
+      ! run_trah has already run the whole trust-region macro loop and passed
+      ! its fresh-Fock test, so an iteration-1 result here is a solved state.
+      cold_first_iter = (iter == 1) .and. (.not. supplied_valid) .and. &
+          .not. (use_trah .and. trim(conv_res%active_converger_name) == 'TRAH')
       cold_held = cold_first_iter .and. (abs(diis_error) < infos%control%conv) &
           .and. (vshift == 0.0_dp) .and. (.not. ps_force_iter) .and. (.not. xc_reuse_now)
 
